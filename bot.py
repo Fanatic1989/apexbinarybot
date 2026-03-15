@@ -1,31 +1,43 @@
 import time
-import random
-from market_scanner import scan_markets
-from config import BOT_NAME, SCAN_INTERVAL_MIN, SCAN_INTERVAL_MAX
+from concurrent.futures import ThreadPoolExecutor
+from strategy import analyze_market
+from trade_manager import place_trade
+import config
 
+MARKETS = [
+"R_10","R_25","R_50","R_75","R_100",
+"1HZ10V","1HZ25V","1HZ50V","1HZ75V","1HZ100V",
+"JD10","JD25","JD50","JD75","JD100",
+"BOOM500","BOOM1000",
+"CRASH500","CRASH1000"
+]
 
-def main():
+running = False
 
-    print(f"{BOT_NAME} started...\n")
+def scan_market(market):
 
-    while True:
+    signal = analyze_market(market)
 
-        try:
-            # Run market scanner
-            scan_markets()
+    if signal:
+        place_trade(market,signal)
 
-        except Exception as e:
-            print("Bot error:", e)
-            print("Continuing bot loop...\n")
+def run_bot():
 
-        # Random wait time between scans
-        wait_time = random.randint(SCAN_INTERVAL_MIN, SCAN_INTERVAL_MAX)
+    global running
 
-        print(f"Next scan in {wait_time} seconds\n")
+    running = True
 
-        time.sleep(wait_time)
+    print("BOT STARTED")
 
+    while running:
 
-# Allows bot to run directly OR from server.py
-if __name__ == "__main__":
-    main()
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            executor.map(scan_market,MARKETS)
+
+        time.sleep(config.SCAN_INTERVAL)
+
+def stop_bot():
+
+    global running
+
+    running = False
