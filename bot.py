@@ -1,36 +1,23 @@
 import time
-from concurrent.futures import ThreadPoolExecutor
-from strategy import analyze_market
-from trade_manager import place_trade
 import config
+from strategy import analyze_market
+from trade_executor import execute_trade
 
-running = False
-
-def scan_market(market):
-
-    signal = analyze_market(market)
-
-    if signal:
-        print(f"🚨 SIGNAL {market}: {signal}")
-        place_trade(market, signal)
 
 def run_bot():
 
-    global running
-    running = True
+    print("BOT STARTED")
 
-    print("APEXBINARYBOT started...")
+    while True:
 
-    while running:
+        for market in config.MARKETS:
 
-        with ThreadPoolExecutor(max_workers=25) as executor:
-            executor.map(scan_market, config.MARKETS)
+            signal = analyze_market(market)
 
-        print("Next scan in", config.SCAN_INTERVAL)
+            if signal:
 
-        time.sleep(config.SCAN_INTERVAL)
+                result = execute_trade(market, signal)
 
-def stop_bot():
+                print(market, signal, result)
 
-    global running
-    running = False
+        time.sleep(20)
