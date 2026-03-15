@@ -1,66 +1,104 @@
 import random
 
-# -------------------------------
-# SIMPLE PRICE GENERATOR
-# (placeholder until real Deriv API candles are connected)
-# -------------------------------
+
+# --------------------------------------------------
+# GENERATE SAMPLE PRICES (temporary until API added)
+# --------------------------------------------------
 
 def generate_prices():
 
     prices = []
 
-    base = random.uniform(100, 200)
+    base = random.uniform(100,200)
 
-    for i in range(50):
+    for i in range(100):
 
-        change = random.uniform(-1, 1)
+        move = random.uniform(-1.2,1.2)
 
-        base = base + change
+        base = base + move
 
-        prices.append(round(base, 2))
+        prices.append(round(base,2))
 
     return prices
 
 
-# -------------------------------
+# --------------------------------------------------
 # EMA CALCULATION
-# -------------------------------
+# --------------------------------------------------
 
 def calculate_ema(prices, period):
 
-    k = 2 / (period + 1)
+    multiplier = 2 / (period + 1)
 
     ema = prices[0]
 
     for price in prices[1:]:
 
-        ema = price * k + ema * (1 - k)
+        ema = (price - ema) * multiplier + ema
 
     return ema
 
 
-# -------------------------------
-# MOMENTUM CHECK
-# -------------------------------
+# --------------------------------------------------
+# RSI CALCULATION
+# --------------------------------------------------
 
-def momentum(prices):
+def calculate_rsi(prices, period=14):
 
-    recent = prices[-1]
+    gains = []
+    losses = []
 
-    past = prices[-5]
+    for i in range(1, len(prices)):
 
-    return recent - past
+        change = prices[i] - prices[i-1]
+
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
 
 
-# -------------------------------
+# --------------------------------------------------
+# CANDLE MOMENTUM
+# --------------------------------------------------
+
+def candle_strength(prices):
+
+    last = prices[-1]
+    prev = prices[-2]
+
+    if last > prev:
+        return "BULL"
+
+    elif last < prev:
+        return "BEAR"
+
+    else:
+        return "FLAT"
+
+
+# --------------------------------------------------
 # TREND DETECTION
-# -------------------------------
+# --------------------------------------------------
 
 def trend_direction(prices):
 
-    ema_fast = calculate_ema(prices, 5)
-
-    ema_slow = calculate_ema(prices, 15)
+    ema_fast = calculate_ema(prices, 9)
+    ema_slow = calculate_ema(prices, 21)
 
     if ema_fast > ema_slow:
         return "UP"
@@ -72,9 +110,9 @@ def trend_direction(prices):
         return "SIDEWAYS"
 
 
-# -------------------------------
-# MAIN SIGNAL FUNCTION
-# -------------------------------
+# --------------------------------------------------
+# MAIN SIGNAL ENGINE
+# --------------------------------------------------
 
 def analyze_market(market):
 
@@ -82,37 +120,35 @@ def analyze_market(market):
 
     trend = trend_direction(prices)
 
-    mom = momentum(prices)
+    rsi = calculate_rsi(prices)
 
-    last_price = prices[-1]
-
-    previous_price = prices[-2]
+    candle = candle_strength(prices)
 
 
-    # -------------------------------
-    # BUY SIGNAL
-    # -------------------------------
+    # ----------------------------
+    # CALL SIGNAL
+    # ----------------------------
 
     if trend == "UP":
 
-        if mom > 0 and last_price > previous_price:
+        if rsi > 55 and candle == "BULL":
 
             return "CALL"
 
 
-    # -------------------------------
-    # SELL SIGNAL
-    # -------------------------------
+    # ----------------------------
+    # PUT SIGNAL
+    # ----------------------------
 
     if trend == "DOWN":
 
-        if mom < 0 and last_price < previous_price:
+        if rsi < 45 and candle == "BEAR":
 
             return "PUT"
 
 
-    # -------------------------------
+    # ----------------------------
     # NO TRADE
-    # -------------------------------
+    # ----------------------------
 
     return None
