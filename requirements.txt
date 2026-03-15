@@ -1,2 +1,7 @@
 websocket-client
 flask
+pandas
+numpy
+ta
+requests
+gunicorn
