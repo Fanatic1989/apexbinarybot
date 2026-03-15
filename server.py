@@ -1,107 +1,69 @@
-from flask import Flask, render_template, request, redirect, session
+from flask import Flask, jsonify, request
 import threading
 import json
-import config
 import bot
+import config
 
 app = Flask(__name__)
 
-app.secret_key = "supersecretkey"
-
-bot_thread = None
+bot_running = False
 
 
-@app.route("/", methods=["GET","POST"])
-def login():
-
-    if request.method == "POST":
-
-        if request.form["username"] == config.ADMIN_USERNAME and request.form["password"] == config.ADMIN_PASSWORD:
-
-            session["user"] = "admin"
-
-            return redirect("/dashboard")
-
-    return render_template("login.html")
-
-
-@app.route("/dashboard")
+@app.route("/")
 def dashboard():
 
-    if "user" not in session:
-        return redirect("/")
+    with open("trade_history.json") as f:
+        history = json.load(f)
 
-    try:
-        with open("trade_history.json") as f:
-            trades = json.load(f)
-    except:
-        trades = []
-
-    wins = sum(1 for t in trades if t["result"]=="W")
-    losses = sum(1 for t in trades if t["result"]=="L")
-    draws = sum(1 for t in trades if t["result"]=="D")
-
-    return render_template(
-        "dashboard.html",
-        trades=trades[-20:],
-        wins=wins,
-        losses=losses,
-        draws=draws,
-        mode=config.MODE
-    )
+    return jsonify(history)
 
 
 @app.route("/start")
-def start():
+def start_bot():
 
-    global bot_thread
+    global bot_running
 
-    if bot_thread is None or not bot_thread.is_alive():
+    if not bot_running:
 
-        bot_thread = threading.Thread(target=bot.run_bot)
+        bot_running = True
 
-        bot_thread.start()
+        threading.Thread(target=bot.run_bot).start()
 
-    return redirect("/dashboard")
+    return {"status": "bot started"}
 
 
 @app.route("/stop")
-def stop():
+def stop_bot():
 
-    bot.stop_bot()
+    global bot_running
+    bot_running = False
 
-    return redirect("/dashboard")
+    return {"status": "bot stopped"}
 
 
 @app.route("/mode/<mode>")
-def mode(mode):
+def change_mode(mode):
 
     config.MODE = mode
 
-    return redirect("/dashboard")
+    return {"mode": config.MODE}
 
 
 @app.route("/add_member", methods=["POST"])
 def add_member():
 
-    name = request.form["name"]
+    user = request.json["user"]
 
-    try:
-        with open("members.json") as f:
-            members = json.load(f)
+    with open("members.json", "r") as f:
+        data = json.load(f)
 
-    except:
-        members = []
+    data["members"].append(user)
 
-    members.append({
-        "name": name
-    })
+    with open("members.json", "w") as f:
+        json.dump(data, f, indent=4)
 
-    with open("members.json","w") as f:
-        json.dump(members,f,indent=2)
-
-    return redirect("/dashboard")
+    return {"status": "member added"}
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3000)
+    app.run()
