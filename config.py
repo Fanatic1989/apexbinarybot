@@ -1,26 +1,52 @@
-BOT_NAME = "APEXBINARYBOT"
+import os
 
-MODE = "DEMO"   # DEMO or LIVE
+# ==========================
+# ADMIN LOGIN
+# ==========================
 
-DEMO_API_TOKEN = "PUT_DEMO_TOKEN_HERE"
-LIVE_API_TOKEN = "PUT_LIVE_TOKEN_HERE"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme123")
+
+
+# ==========================
+# DERIV TOKENS
+# ==========================
+
+DEMO_TOKEN = os.getenv("DEMO_TOKEN")
+LIVE_TOKEN = os.getenv("LIVE_TOKEN")
+
+
+# ==========================
+# BOT MODE
+# ==========================
+
+MODE = "demo"
+
+
+# ==========================
+# TRADING SETTINGS
+# ==========================
 
 START_BALANCE = 100
-RISK_PER_TRADE = 0.02
+RISK_PERCENT = 2
+COMPOUND = True
 
-SCAN_INTERVAL_MIN = 20
-SCAN_INTERVAL_MAX = 39
 
-MAX_TRADES_PER_DAY = 100
-MAX_TRADES_PER_SESSION = 50
+# ==========================
+# BOT SPEED
+# ==========================
 
-CONSECUTIVE_LOSS_LIMIT = 3
-DAILY_LOSS_LIMIT = 5
+SCAN_INTERVAL = 30
+
+
+# ==========================
+# MARKETS
+# ==========================
 
 MARKETS = [
-"R_10",
-"R_25",
-"R_50",
-"R_75",
-"R_100"
+"R_10","R_25","R_50","R_75","R_100",
+"1HZ10V","1HZ25V","1HZ50V","1HZ75V","1HZ100V",
+"JD10","JD25","JD50","JD75","JD100",
+"BOOM500","BOOM1000",
+"CRASH500","CRASH1000"
 ]
