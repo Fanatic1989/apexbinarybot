@@ -1,23 +1,39 @@
 import websocket
 import json
-from config import MODE, DEMO_API_TOKEN, LIVE_API_TOKEN
+import config
+import pandas as pd
 
-def get_token():
-    if MODE == "DEMO":
-        return DEMO_API_TOKEN
-    else:
-        return LIVE_API_TOKEN
+DERIV_WS = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
-def connect():
-    ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3")
-    token = get_token()
 
-    auth_request = {
-        "authorize": token
+def get_candles(symbol, count=100):
+
+    ws = websocket.create_connection(DERIV_WS)
+
+    auth = {
+        "authorize": config.DEMO_TOKEN if config.MODE == "demo" else config.LIVE_TOKEN
     }
 
-    ws.send(json.dumps(auth_request))
-    result = ws.recv()
-    print("Connected to Deriv API")
+    ws.send(json.dumps(auth))
+    ws.recv()
 
-    return ws
+    request = {
+        "ticks_history": symbol,
+        "adjust_start_time": 1,
+        "count": count,
+        "end": "latest",
+        "style": "candles",
+        "granularity": 60
+    }
+
+    ws.send(json.dumps(request))
+
+    result = json.loads(ws.recv())
+
+    ws.close()
+
+    candles = result["candles"]
+
+    prices = [c["close"] for c in candles]
+
+    return prices
