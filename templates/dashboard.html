@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<title>APEX BOT DASHBOARD</title>
+
+<style>
+
+body{
+background:#0f172a;
+color:white;
+font-family:Arial;
+padding:40px;
+}
+
+.card{
+background:#1e293b;
+padding:20px;
+margin-bottom:20px;
+border-radius:10px;
+}
+
+button{
+padding:10px;
+margin:5px;
+}
+
+table{
+width:100%;
+background:#1e293b;
+}
+
+th,td{
+padding:10px;
+text-align:center;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>APEX BINARY BOT DASHBOARD</h1>
+
+<div class="card">
+
+<h3>Bot Controls</h3>
+
+<a href="/start"><button>START BOT</button></a>
+<a href="/stop"><button>STOP BOT</button></a>
+
+<a href="/mode/demo"><button>DEMO MODE</button></a>
+<a href="/mode/live"><button>LIVE MODE</button></a>
+
+<p>Current Mode: {{mode}}</p>
+
+</div>
+
+
+<div class="card">
+
+<h3>Trade Statistics</h3>
+
+Wins: {{wins}} |
+Losses: {{losses}} |
+Draws: {{draws}}
+
+</div>
+
+
+<div class="card">
+
+<h3>Recent Trades</h3>
+
+<table>
+
+<tr>
+<th>Market</th>
+<th>Direction</th>
+<th>Size</th>
+<th>Result</th>
+</tr>
+
+{% for t in trades %}
+
+<tr>
+
+<td>{{t.market}}</td>
+<td>{{t.direction}}</td>
+<td>{{t.size}}</td>
+<td>{{t.result}}</td>
+
+</tr>
+
+{% endfor %}
+
+</table>
+
+</div>
+
+
+<div class="card">
+
+<h3>Add Member</h3>
+
+<form method="post" action="/add_member">
+
+<input name="name" placeholder="Member name">
+
+<button>Add Member</button>
+
+</form>
+
+</div>
+
+</body>
+</html>
