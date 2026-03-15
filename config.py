@@ -1,52 +1,47 @@
 import os
+from dotenv import load_dotenv
 
-# ==========================
-# ADMIN LOGIN
-# ==========================
+load_dotenv()
 
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme123")
+# MODE
+MODE = os.getenv("MODE", "demo")
 
-
-# ==========================
-# DERIV TOKENS
-# ==========================
-
+# TOKENS
 DEMO_TOKEN = os.getenv("DEMO_TOKEN")
 LIVE_TOKEN = os.getenv("LIVE_TOKEN")
 
+# TELEGRAM
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ==========================
-# BOT MODE
-# ==========================
+# TRADE SETTINGS
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 1))
+DURATION = int(os.getenv("DURATION", 1))
+CURRENCY = os.getenv("CURRENCY", "USD")
 
-MODE = "demo"
+# COMPOUND SETTINGS
+COMPOUND = os.getenv("COMPOUND", "true").lower() == "true"
+COMPOUND_PERCENT = float(os.getenv("COMPOUND_PERCENT", 0.20))
 
-
-# ==========================
-# TRADING SETTINGS
-# ==========================
-
-START_BALANCE = 100
-RISK_PERCENT = 2
-COMPOUND = True
-
-
-# ==========================
-# BOT SPEED
-# ==========================
-
-SCAN_INTERVAL = 30
-
-
-# ==========================
 # MARKETS
-# ==========================
-
 MARKETS = [
-"R_10","R_25","R_50","R_75","R_100",
-"1HZ10V","1HZ25V","1HZ50V","1HZ75V","1HZ100V",
-"JD10","JD25","JD50","JD75","JD100",
-"BOOM500","BOOM1000",
-"CRASH500","CRASH1000"
+"R_10",
+"R_25",
+"R_50",
+"R_75",
+"R_100",
+"1HZ10V",
+"1HZ25V",
+"1HZ50V",
+"1HZ75V",
+"1HZ100V",
+"JD10",
+"JD25",
+"JD50",
+"JD75",
+"JD100",
+"BOOM500",
+"BOOM1000",
+"CRASH500",
+"CRASH1000"
 ]
