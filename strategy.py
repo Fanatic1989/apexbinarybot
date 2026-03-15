@@ -1,154 +1,83 @@
-import random
+import pandas as pd
+import numpy as np
+from deriv_api import get_candles
 
 
-# --------------------------------------------------
-# GENERATE SAMPLE PRICES (temporary until API added)
-# --------------------------------------------------
+# -----------------------------------
+# EMA
+# -----------------------------------
 
-def generate_prices():
+def ema(series, period):
 
-    prices = []
-
-    base = random.uniform(100,200)
-
-    for i in range(100):
-
-        move = random.uniform(-1.2,1.2)
-
-        base = base + move
-
-        prices.append(round(base,2))
-
-    return prices
+    return series.ewm(span=period, adjust=False).mean()
 
 
-# --------------------------------------------------
-# EMA CALCULATION
-# --------------------------------------------------
+# -----------------------------------
+# RSI
+# -----------------------------------
 
-def calculate_ema(prices, period):
+def rsi(series, period=14):
 
-    multiplier = 2 / (period + 1)
+    delta = series.diff()
 
-    ema = prices[0]
+    gain = delta.clip(lower=0)
 
-    for price in prices[1:]:
+    loss = -delta.clip(upper=0)
 
-        ema = (price - ema) * multiplier + ema
+    avg_gain = gain.rolling(period).mean()
 
-    return ema
-
-
-# --------------------------------------------------
-# RSI CALCULATION
-# --------------------------------------------------
-
-def calculate_rsi(prices, period=14):
-
-    gains = []
-    losses = []
-
-    for i in range(1, len(prices)):
-
-        change = prices[i] - prices[i-1]
-
-        if change > 0:
-            gains.append(change)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(change))
-
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-
-    if avg_loss == 0:
-        return 100
+    avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss
 
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 
-# --------------------------------------------------
-# CANDLE MOMENTUM
-# --------------------------------------------------
-
-def candle_strength(prices):
-
-    last = prices[-1]
-    prev = prices[-2]
-
-    if last > prev:
-        return "BULL"
-
-    elif last < prev:
-        return "BEAR"
-
-    else:
-        return "FLAT"
-
-
-# --------------------------------------------------
-# TREND DETECTION
-# --------------------------------------------------
-
-def trend_direction(prices):
-
-    ema_fast = calculate_ema(prices, 9)
-    ema_slow = calculate_ema(prices, 21)
-
-    if ema_fast > ema_slow:
-        return "UP"
-
-    elif ema_fast < ema_slow:
-        return "DOWN"
-
-    else:
-        return "SIDEWAYS"
-
-
-# --------------------------------------------------
+# -----------------------------------
 # MAIN SIGNAL ENGINE
-# --------------------------------------------------
+# -----------------------------------
 
-def analyze_market(market):
+def analyze_market(symbol):
 
-    prices = generate_prices()
+    prices = get_candles(symbol)
 
-    trend = trend_direction(prices)
+    df = pd.DataFrame(prices, columns=["close"])
 
-    rsi = calculate_rsi(prices)
+    df["ema_fast"] = ema(df["close"], 9)
 
-    candle = candle_strength(prices)
+    df["ema_slow"] = ema(df["close"], 21)
+
+    df["rsi"] = rsi(df["close"])
+
+    last = df.iloc[-1]
+
+    prev = df.iloc[-2]
 
 
-    # ----------------------------
+    # -----------------------
     # CALL SIGNAL
-    # ----------------------------
+    # -----------------------
 
-    if trend == "UP":
+    if last["ema_fast"] > last["ema_slow"]:
 
-        if rsi > 55 and candle == "BULL":
+        if last["rsi"] > 55:
 
-            return "CALL"
+            if last["close"] > prev["close"]:
+
+                return "CALL"
 
 
-    # ----------------------------
+    # -----------------------
     # PUT SIGNAL
-    # ----------------------------
+    # -----------------------
 
-    if trend == "DOWN":
+    if last["ema_fast"] < last["ema_slow"]:
 
-        if rsi < 45 and candle == "BEAR":
+        if last["rsi"] < 45:
 
-            return "PUT"
+            if last["close"] < prev["close"]:
 
+                return "PUT"
 
-    # ----------------------------
-    # NO TRADE
-    # ----------------------------
 
     return None
