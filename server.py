@@ -1,3 +1,4 @@
+import os
 from flask import Flask, jsonify, request
 import threading
 import json
@@ -24,9 +25,7 @@ def start_bot():
     global bot_running
 
     if not bot_running:
-
         bot_running = True
-
         threading.Thread(target=bot.run_bot).start()
 
     return {"status": "bot started"}
@@ -66,4 +65,7 @@ def add_member():
 
 
 if __name__ == "__main__":
-    app.run()
+
+    port = int(os.environ.get("PORT", 10000))
+
+    app.run(host="0.0.0.0", port=port)
