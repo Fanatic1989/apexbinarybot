@@ -6,3 +6,4 @@ ta
 requests
 gunicorn
 dotenv
+python-telegram-bot
