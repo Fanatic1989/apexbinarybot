@@ -209,6 +209,41 @@ def health():
     return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
 
 
+
+# ─────────────────────────────────────────
+# Route: Connection test (debug)
+# ─────────────────────────────────────────
+@app.route("/test-connection")
+@login_required
+def test_connection():
+    """Test Deriv API connection and show exactly what is failing."""
+    import websocket, json
+    results = {
+        "app_id":     config.DERIV_APP_ID,
+        "mode":       config.MODE,
+        "token_set":  bool(config.ACTIVE_TOKEN),
+        "token_preview": config.ACTIVE_TOKEN[:6] + "..." if config.ACTIVE_TOKEN else "NOT SET",
+        "ws_url":     f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
+        "auth_result": None,
+        "balance":    None,
+        "error":      None
+    }
+    try:
+        ws = websocket.create_connection(results["ws_url"], timeout=10)
+        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
+        resp = json.loads(ws.recv())
+        if "error" in resp:
+            results["auth_result"] = "FAILED"
+            results["error"] = resp["error"]["message"]
+        else:
+            results["auth_result"] = "SUCCESS"
+            results["balance"] = resp.get("authorize", {}).get("balance")
+        ws.close()
+    except Exception as e:
+        results["auth_result"] = "EXCEPTION"
+        results["error"] = str(e)
+    return jsonify(results)
+
 # ─────────────────────────────────────────
 # Bot runner wrapper
 # ─────────────────────────────────────────
