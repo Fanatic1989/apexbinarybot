@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: apex-binary-bot
+    runtime: python
+    pythonVersion: "3.11.9"
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: DERIV_APP_ID
+        sync: false
+      - key: DEMO_TOKEN
+        sync: false
+      - key: LIVE_TOKEN
+        sync: false
+      - key: MODE
+        value: demo
+      - key: SCAN_INTERVAL
+        value: "60"
+      - key: STAKE_PERCENT
+        value: "1.0"
+      - key: MAX_DAILY_LOSS_PCT
+        value: "10.0"
+      - key: MAX_CONSECUTIVE_LOSS
+        value: "3"
+      - key: DAILY_PROFIT_TARGET
+        value: "5.0"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
