@@ -352,6 +352,6 @@ def _run_bot_safe():
 # Entry point
 # ─────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
     log.info(f"[SERVER] Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
