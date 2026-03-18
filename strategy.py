@@ -1,257 +1,289 @@
 import logging
-import pandas as pd
 import numpy as np
-
-import config
-from sniper_filter import sniper_confirm
+import pandas as pd
 
 log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────
-# Indicator functions
+# Main sniper confirmation entry point
 # ─────────────────────────────────────────
-def _ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta    = series.diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.ewm(span=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, adjust=False).mean()
-    rs       = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-
-def _bollinger(df: pd.DataFrame, period: int = 20, std_dev: int = 2) -> pd.DataFrame:
-    df["bb_mid"]   = df["close"].rolling(period).mean()
-    df["bb_std"]   = df["close"].rolling(period).std()
-    df["bb_upper"] = df["bb_mid"] + (df["bb_std"] * std_dev)
-    df["bb_lower"] = df["bb_mid"] - (df["bb_std"] * std_dev)
-    df["bb_width"] = df["bb_upper"] - df["bb_lower"]
-    return df
-
-
-# ─────────────────────────────────────────
-# Main strategy engine
-# ─────────────────────────────────────────
-def analyze_market(candles: list, market: str) -> dict:
+def sniper_confirm(candles: list, signal: dict) -> dict:
     """
-    Three signal modes from strictest to most relaxed:
-
-    Mode A — EMA crossover (strictest, highest confidence)
-      EMA9 just crossed EMA21 + RSI in range + candle confirms
-
-    Mode B — EMA trend + RSI momentum (medium, fires more often)
-      EMA9 already above/below EMA21 for 2+ candles + RSI confirms
-
-    Mode C — RSI + candle momentum (most relaxed, catches fast moves)
-      RSI in strong zone + last 2 candles both same direction
+    Runs multiple confirmation filters on a signal.
+    Returns an enriched signal dict with:
+      - confirmed : bool   (True = safe to trade)
+      - confidence: str    ("high" | "normal" | "low")
+      - score     : int    (0–5, how many filters passed)
+      - reasons   : list   (which filters passed/failed)
     """
-    if not candles or len(candles) < 30:
-        log.warning(f"[STRATEGY] {market} — insufficient candles")
-        return None
+    if not candles or len(candles) < 20:
+        return _reject(signal, "Not enough candle data for sniper filter")
 
-    try:
-        df = pd.DataFrame(candles)
-        for col in ["open", "high", "low", "close"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-        df.reset_index(drop=True, inplace=True)
-    except Exception as e:
-        log.error(f"[STRATEGY] {market} — DataFrame error: {e}")
-        return None
+    direction = signal.get("direction", "NONE")
+    if direction == "NONE":
+        return _reject(signal, "No direction to confirm")
 
-    if len(df) < 30:
-        return None
+    df      = _to_df(candles)
+    score   = 0
+    reasons = []
 
-    # ── Indicators ───────────────────────
-    df["ema9"]  = _ema(df["close"], 9)
-    df["ema21"] = _ema(df["close"], 21)
-    df["rsi"]   = _rsi(df["close"], 14)
-    df          = _bollinger(df)
+    # ── Filter 1: Trend alignment ─────────
+    passed, reason = _check_trend(df, direction)
+    reasons.append(reason)
+    if passed:
+        score += 1
 
-    last  = df.iloc[-1]
-    prev  = df.iloc[-2]
-    prev2 = df.iloc[-3]
+    # ── Filter 2: RSI zone ────────────────
+    passed, reason = _check_rsi_zone(df, direction)
+    reasons.append(reason)
+    if passed:
+        score += 1
 
-    for field in ["ema9", "ema21", "rsi", "bb_mid"]:
-        if pd.isna(last[field]):
-            return _no_signal(market)
+    # ── Filter 3: Candle momentum ─────────
+    passed, reason = _check_candle_momentum(df, direction)
+    reasons.append(reason)
+    if passed:
+        score += 1
 
-    rsi_val = float(last["rsi"])
+    # ── Filter 4: Bollinger Band position ─
+    passed, reason = _check_bb_position(df, direction)
+    reasons.append(reason)
+    if passed:
+        score += 1
 
-    # ── Special markets ──────────────────
-    if market in ("BOOM500", "BOOM1000"):
-        return _boom_signal(df, market, rsi_val, candles)
-    if market in ("CRASH500", "CRASH1000"):
-        return _crash_signal(df, market, rsi_val, candles)
-    if market.startswith("JD"):
-        return _jump_signal(df, market, candles)
+    # ── Filter 5: Volume / body strength ──
+    passed, reason = _check_body_strength(df, direction)
+    reasons.append(reason)
+    if passed:
+        score += 1
 
-    # ── Hard RSI block (only extremes) ───
-    # Widened from 70/30 to 75/25 to allow more signals
-    if rsi_val > 75 or rsi_val < 25:
-        log.debug(f"[STRATEGY] {market} — RSI extreme ({rsi_val:.1f})")
-        return _no_signal(market)
-
-    ema9_last  = float(last["ema9"])
-    ema21_last = float(last["ema21"])
-    ema9_prev  = float(prev["ema9"])
-    ema21_prev = float(prev["ema21"])
-    ema9_prev2 = float(prev2["ema9"])
-    ema21_prev2= float(prev2["ema21"])
-
-    bullish_candle = float(last["close"]) > float(last["open"])
-    bearish_candle = float(last["close"]) < float(last["open"])
-    bullish_prev   = float(prev["close"]) > float(prev["open"])
-    bearish_prev   = float(prev["close"]) < float(prev["open"])
-
-    # ─────────────────────────────────────
-    # Mode A — Fresh EMA crossover
-    # Confidence: HIGH
-    # ─────────────────────────────────────
-    cross_up   = (ema9_prev <= ema21_prev and ema9_last > ema21_last)
-    cross_down = (ema9_prev >= ema21_prev and ema9_last < ema21_last)
-
-    if cross_up and 42 <= rsi_val <= 68 and bullish_candle:
-        log.info(f"[STRATEGY] {market} — Mode A CALL (fresh cross, RSI {rsi_val:.1f})")
-        return _build_signal(market, "CALL", "high", candles)
-
-    if cross_down and 32 <= rsi_val <= 58 and bearish_candle:
-        log.info(f"[STRATEGY] {market} — Mode A PUT (fresh cross, RSI {rsi_val:.1f})")
-        return _build_signal(market, "PUT", "high", candles)
-
-    # ─────────────────────────────────────
-    # Mode B — EMA trend continuation
-    # EMA9 has been above/below EMA21 for 2+ candles
-    # Confidence: NORMAL
-    # ─────────────────────────────────────
-    trend_up   = (ema9_last > ema21_last and
-                  ema9_prev > ema21_prev and
-                  ema9_prev2 > ema21_prev2)
-
-    trend_down = (ema9_last < ema21_last and
-                  ema9_prev < ema21_prev and
-                  ema9_prev2 < ema21_prev2)
-
-    if trend_up and 40 <= rsi_val <= 65 and bullish_candle:
-        log.info(f"[STRATEGY] {market} — Mode B CALL (trend, RSI {rsi_val:.1f})")
-        return _build_signal(market, "CALL", "normal", candles)
-
-    if trend_down and 35 <= rsi_val <= 60 and bearish_candle:
-        log.info(f"[STRATEGY] {market} — Mode B PUT (trend, RSI {rsi_val:.1f})")
-        return _build_signal(market, "PUT", "normal", candles)
-
-    # ─────────────────────────────────────
-    # Mode C — RSI momentum + candle streak
-    # No EMA cross needed — pure momentum
-    # Confidence: NORMAL
-    # ─────────────────────────────────────
-    strong_bull = (rsi_val >= 55 and bullish_candle and bullish_prev)
-    strong_bear = (rsi_val <= 45 and bearish_candle and bearish_prev)
-
-    if strong_bull and ema9_last > ema21_last:
-        log.info(f"[STRATEGY] {market} — Mode C CALL (momentum, RSI {rsi_val:.1f})")
-        return _build_signal(market, "CALL", "normal", candles)
-
-    if strong_bear and ema9_last < ema21_last:
-        log.info(f"[STRATEGY] {market} — Mode C PUT (momentum, RSI {rsi_val:.1f})")
-        return _build_signal(market, "PUT", "normal", candles)
-
-    log.debug(f"[STRATEGY] {market} — No signal (RSI {rsi_val:.1f})")
-    return _no_signal(market)
-
-
-# ─────────────────────────────────────────
-# Build and confirm signal
-# ─────────────────────────────────────────
-def _build_signal(market: str, direction: str,
-                  base_confidence: str, candles: list) -> dict:
-    """
-    Run sniper filter with relaxed scoring.
-    High confidence: score >= 3  (was 4)
-    Normal:          score >= 1  (was 2)
-    Always trade if score >= 1.
-    """
-    raw = {
-        "market":    market,
-        "direction": direction,
-        "expiry":    config.get_expiry(market)
-    }
-    result = sniper_confirm(candles, raw)
-
-    score = result.get("score", 0)
-
-    # Relaxed thresholds — trade if at least 1 filter passes
+    # ── Confidence grading ────────────────
     if score >= 3:
-        result["confidence"] = "high"
-        result["confirmed"]  = True
+        confidence = "high"
+        confirmed  = True
     elif score >= 1:
-        result["confidence"] = "normal"
-        result["confirmed"]  = True
+        confidence = "normal"
+        confirmed  = True
     else:
-        # Score 0 — only skip if base confidence was not high
-        if base_confidence == "high":
-            result["confirmed"]  = True
-            result["confidence"] = "normal"
-        else:
-            result["confirmed"]  = False
+        confidence = "low"
+        confirmed  = False
 
+    result = {
+        **signal,
+        "confirmed":  confirmed,
+        "confidence": confidence,
+        "score":      score,
+        "reasons":    reasons
+    }
+
+    _log_result(signal.get("market", "?"), direction, score, confidence, confirmed, reasons)
     return result
 
 
 # ─────────────────────────────────────────
-# Boom index signal
+# Filter 1 — Trend alignment (EMA 9/21/50)
 # ─────────────────────────────────────────
-def _boom_signal(df, market, rsi_val, candles):
-    last = df.iloc[-1]
-    if float(last["ema9"]) < float(last["ema21"]) and rsi_val < 45:
-        log.info(f"[STRATEGY] {market} — BOOM CALL (RSI {rsi_val:.1f})")
-        return _build_signal(market, "CALL", "normal", candles)
-    return _no_signal(market)
+def _check_trend(df: pd.DataFrame, direction: str) -> tuple:
+    """
+    CALL: EMA9 > EMA21 > EMA50  (uptrend stack)
+    PUT : EMA9 < EMA21 < EMA50  (downtrend stack)
+    """
+    try:
+        ema9  = df["close"].ewm(span=9,  adjust=False).mean().iloc[-1]
+        ema21 = df["close"].ewm(span=21, adjust=False).mean().iloc[-1]
+        ema50 = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+
+        if direction == "CALL":
+            passed = ema9 > ema21 > ema50
+        else:
+            passed = ema9 < ema21 < ema50
+
+        label = f"Trend stack {'✓' if passed else '✗'} (EMA9={ema9:.4f} EMA21={ema21:.4f} EMA50={ema50:.4f})"
+        return passed, label
+
+    except Exception as e:
+        return False, f"Trend check error: {e}"
 
 
 # ─────────────────────────────────────────
-# Crash index signal
+# Filter 2 — RSI zone check
 # ─────────────────────────────────────────
-def _crash_signal(df, market, rsi_val, candles):
-    last = df.iloc[-1]
-    if float(last["ema9"]) > float(last["ema21"]) and rsi_val > 55:
-        log.info(f"[STRATEGY] {market} — CRASH PUT (RSI {rsi_val:.1f})")
-        return _build_signal(market, "PUT", "normal", candles)
-    return _no_signal(market)
+def _check_rsi_zone(df: pd.DataFrame, direction: str) -> tuple:
+    """
+    CALL: RSI between 45–65 (momentum building upward, not overbought)
+    PUT : RSI between 35–55 (momentum building downward, not oversold)
+    Reject if RSI > 75 or RSI < 25 (extreme zones)
+    """
+    try:
+        rsi = _calc_rsi(df["close"], 14)
+
+        # Hard reject at extremes
+        if rsi > 75 or rsi < 25:
+            return False, f"RSI extreme ✗ ({rsi:.1f}) — skipping"
+
+        if direction == "CALL":
+            passed = 45 <= rsi <= 65
+        else:
+            passed = 35 <= rsi <= 55
+
+        label = f"RSI zone {'✓' if passed else '✗'} ({rsi:.1f})"
+        return passed, label
+
+    except Exception as e:
+        return False, f"RSI check error: {e}"
 
 
 # ─────────────────────────────────────────
-# Jump index signal
+# Filter 3 — Candle momentum (last 3 candles)
 # ─────────────────────────────────────────
-def _jump_signal(df, market, candles):
-    if len(df) < 5:
-        return _no_signal(market)
-    last      = df.iloc[-1]
-    avg_body  = (df["close"] - df["open"]).abs().tail(20).mean()
-    last_body = abs(float(last["close"]) - float(last["open"]))
-    if avg_body > 0 and last_body > avg_body * 4:
-        spike_up  = float(last["close"]) > float(last["open"])
-        direction = "PUT" if spike_up else "CALL"
-        log.info(f"[STRATEGY] {market} — JUMP spike → {direction}")
-        return _build_signal(market, direction, "normal", candles)
-    return _no_signal(market)
+def _check_candle_momentum(df: pd.DataFrame, direction: str) -> tuple:
+    """
+    CALL: At least 2 of the last 3 candles are bullish
+    PUT : At least 2 of the last 3 candles are bearish
+    """
+    try:
+        last3 = df.tail(3)
+        bullish_count = (last3["close"] > last3["open"]).sum()
+        bearish_count = (last3["close"] < last3["open"]).sum()
+
+        if direction == "CALL":
+            passed = bullish_count >= 2
+            label  = f"Candle momentum {'✓' if passed else '✗'} ({bullish_count}/3 bullish)"
+        else:
+            passed = bearish_count >= 2
+            label  = f"Candle momentum {'✓' if passed else '✗'} ({bearish_count}/3 bearish)"
+
+        return passed, label
+
+    except Exception as e:
+        return False, f"Candle momentum check error: {e}"
 
 
 # ─────────────────────────────────────────
-# No signal
+# Filter 4 — Bollinger Band position
 # ─────────────────────────────────────────
-def _no_signal(market: str) -> dict:
+def _check_bb_position(df: pd.DataFrame, direction: str) -> tuple:
+    """
+    CALL: Price above BB midline (above 20-period MA) — bullish territory
+    PUT : Price below BB midline — bearish territory
+    Bonus: BB squeeze detected = higher confidence breakout setup
+    """
+    try:
+        close  = df["close"]
+        sma20  = close.rolling(20).mean()
+        std20  = close.rolling(20).std()
+        upper  = sma20 + (2 * std20)
+        lower  = sma20 - (2 * std20)
+        mid    = sma20
+
+        last_close = close.iloc[-1]
+        last_mid   = mid.iloc[-1]
+        last_upper = upper.iloc[-1]
+        last_lower = lower.iloc[-1]
+
+        # Squeeze: band width narrowing (current width < 50% of 20-period avg width)
+        band_width     = (upper - lower) / mid
+        avg_band_width = band_width.rolling(20).mean().iloc[-1]
+        curr_width     = band_width.iloc[-1]
+        squeeze        = curr_width < (avg_band_width * 0.5)
+
+        if direction == "CALL":
+            passed = last_close > last_mid
+            extra  = " + SQUEEZE ✓" if squeeze and last_close > last_mid else ""
+        else:
+            passed = last_close < last_mid
+            extra  = " + SQUEEZE ✓" if squeeze and last_close < last_mid else ""
+
+        label = (f"BB position {'✓' if passed else '✗'} "
+                 f"(close={last_close:.4f} mid={last_mid:.4f}){extra}")
+        return passed, label
+
+    except Exception as e:
+        return False, f"BB check error: {e}"
+
+
+# ─────────────────────────────────────────
+# Filter 5 — Candle body strength
+# ─────────────────────────────────────────
+def _check_body_strength(df: pd.DataFrame, direction: str) -> tuple:
+    """
+    Checks that the last candle has a meaningful body (not a doji).
+    Body must be at least 40% of the total candle range.
+    Also checks that the last candle body is larger than the 10-period average body.
+    """
+    try:
+        last = df.iloc[-1]
+        body  = abs(last["close"] - last["open"])
+        range_ = last["high"] - last["low"]
+
+        if range_ == 0:
+            return False, "Doji candle ✗ (zero range)"
+
+        body_ratio = body / range_
+
+        # Average body over last 10 candles
+        avg_body = (df["close"] - df["open"]).abs().tail(10).mean()
+
+        strong_body   = body_ratio >= 0.4
+        above_average = body >= avg_body * 0.8
+
+        passed = strong_body and above_average
+
+        # Direction check — body must point the right way
+        if direction == "CALL" and last["close"] <= last["open"]:
+            return False, f"Body direction ✗ (bearish candle on CALL signal)"
+        if direction == "PUT" and last["close"] >= last["open"]:
+            return False, f"Body direction ✗ (bullish candle on PUT signal)"
+
+        label = (f"Body strength {'✓' if passed else '✗'} "
+                 f"(ratio={body_ratio:.0%}, avg={avg_body:.5f})")
+        return passed, label
+
+    except Exception as e:
+        return False, f"Body strength check error: {e}"
+
+
+# ─────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────
+def _to_df(candles: list) -> pd.DataFrame:
+    """Convert candle list of dicts to a pandas DataFrame."""
+    df = pd.DataFrame(candles)
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+
+def _calc_rsi(series: pd.Series, period: int = 14) -> float:
+    """Calculate RSI manually (no external dependency)."""
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / loss.replace(0, np.nan)
+    rsi   = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
+
+
+def _reject(signal: dict, reason: str) -> dict:
+    """Return a rejected signal dict."""
+    log.debug(f"[SNIPER] Rejected — {reason}")
     return {
-        "market":     market,
-        "direction":  "NONE",
-        "confidence": "low",
+        **signal,
         "confirmed":  False,
+        "confidence": "low",
         "score":      0,
-        "reasons":    [],
-        "expiry":     config.get_expiry(market)
+        "reasons":    [reason]
     }
+
+
+def _log_result(market, direction, score, confidence, confirmed, reasons):
+    status = "✅ CONFIRMED" if confirmed else "❌ REJECTED"
+    log.info(
+        f"[SNIPER] {market} {direction} | {status} | "
+        f"Score: {score}/5 | Confidence: {confidence}"
+    )
+    for r in reasons:
+        log.debug(f"[SNIPER]   {r}")
