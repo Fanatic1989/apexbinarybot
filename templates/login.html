@@ -1,52 +1,209 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Apex Binary Bot — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-<title>APEX BOT LOGIN</title>
+    body {
+      background: #0a0f1e;
+      color: #e2e8f0;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
 
-<style>
+    /* ── Card ── */
+    .login-card {
+      background: #0d1424;
+      border: 1px solid #1e2d45;
+      border-radius: 16px;
+      padding: 40px 36px 36px;
+      width: 100%;
+      max-width: 380px;
+    }
 
-body{
-background:#111;
-color:white;
-font-family:Arial;
-text-align:center;
-padding-top:100px;
-}
+    /* ── Logo / brand ── */
+    .brand {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .brand-icon {
+      font-size: 36px;
+      line-height: 1;
+      margin-bottom: 10px;
+    }
+    .brand-name {
+      font-size: 20px;
+      font-weight: 700;
+      color: #00e676;
+      letter-spacing: .5px;
+    }
+    .brand-sub {
+      font-size: 12px;
+      color: #475569;
+      margin-top: 4px;
+    }
 
-input{
-padding:10px;
-margin:10px;
-width:200px;
-}
+    /* ── Form fields ── */
+    .field { margin-bottom: 16px; }
 
-button{
-padding:10px 20px;
-background:#00ff9c;
-border:none;
-}
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 6px;
+    }
 
-</style>
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 11px 14px;
+      background: #060d18;
+      border: 1px solid #1e2d45;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color .2s;
+    }
+    input[type="text"]:focus,
+    input[type="password"]:focus {
+      border-color: #00e676;
+    }
+    input::placeholder { color: #334155; }
 
+    /* ── Error message ── */
+    .error-box {
+      background: #2d0a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #ff5252;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* ── Submit button ── */
+    .btn-login {
+      width: 100%;
+      padding: 12px;
+      background: #00e676;
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      letter-spacing: .3px;
+      transition: opacity .15s, transform .1s;
+      margin-top: 6px;
+    }
+    .btn-login:hover  { opacity: .9; }
+    .btn-login:active { transform: scale(0.98); }
+
+    /* ── Mode indicator ── */
+    .mode-strip {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-top: 24px;
+      font-size: 11px;
+      color: #475569;
+    }
+    .mode-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #7986cb;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      margin-top: 32px;
+      font-size: 11px;
+      color: #334155;
+      text-align: center;
+    }
+  </style>
 </head>
-
 <body>
 
-<h1>APEX BINARY BOT</h1>
+<div class="login-card">
 
-<form method="post">
+  <!-- Brand -->
+  <div class="brand">
+    <div class="brand-icon">⚡</div>
+    <div class="brand-name">APEX BINARY BOT</div>
+    <div class="brand-sub">Deriv Synthetic Indices Engine</div>
+  </div>
 
-<input name="username" placeholder="Username">
+  <!-- Error message (shown by Flask when login fails) -->
+  {% if error %}
+  <div class="error-box">
+    <span>⚠</span>
+    <span>{{ error }}</span>
+  </div>
+  {% endif %}
 
-<br>
+  <!-- Login form -->
+  <form method="POST" action="/login" autocomplete="off">
 
-<input type="password" name="password" placeholder="Password">
+    <div class="field">
+      <label for="username">Username</label>
+      <input
+        type="text"
+        id="username"
+        name="username"
+        placeholder="Enter username"
+        autocomplete="off"
+        autocapitalize="none"
+        spellcheck="false"
+        required
+      />
+    </div>
 
-<br>
+    <div class="field">
+      <label for="password">Password</label>
+      <input
+        type="password"
+        id="password"
+        name="password"
+        placeholder="Enter password"
+        autocomplete="current-password"
+        required
+      />
+    </div>
 
-<button type="submit">Login</button>
+    <button type="submit" class="btn-login">Login →</button>
 
-</form>
+  </form>
+
+  <!-- Mode indicator -->
+  <div class="mode-strip">
+    <span class="mode-dot"></span>
+    <span>Secure access — dashboard protected</span>
+  </div>
+
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  Apex Binary Bot &nbsp;·&nbsp; Deriv Synthetic Indices &nbsp;·&nbsp; v1.0
+</div>
 
 </body>
 </html>
