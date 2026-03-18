@@ -1,10 +1,19 @@
 import pandas as pd
+import numpy as np
 from deriv_api import get_candles
 
+
+# -----------------------------
+# EMA
+# -----------------------------
 
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
+
+# -----------------------------
+# RSI
+# -----------------------------
 
 def rsi(series, period=14):
 
@@ -21,22 +30,100 @@ def rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
+# -----------------------------
+# Bollinger Bands
+# -----------------------------
+
+def bollinger(df):
+
+    df["ma"] = df["close"].rolling(20).mean()
+
+    df["std"] = df["close"].rolling(20).std()
+
+    df["upper"] = df["ma"] + (df["std"] * 2)
+    df["lower"] = df["ma"] - (df["std"] * 2)
+
+    df["width"] = df["upper"] - df["lower"]
+
+    return df
+
+
+# -----------------------------
+# Strategy Engine
+# -----------------------------
+
 def analyze_market(symbol):
 
-    prices = get_candles(symbol)
+    candles = get_candles(symbol)
 
-    df = pd.DataFrame(prices, columns=["close"])
+    if len(candles) < 30:
+        return None
 
-    df["ema_fast"] = ema(df["close"], 9)
-    df["ema_slow"] = ema(df["close"], 21)
+    df = pd.DataFrame(candles)
+
+    df["ema9"] = ema(df["close"], 9)
+    df["ema21"] = ema(df["close"], 21)
+
     df["rsi"] = rsi(df["close"])
 
-    last = df.iloc[-1]
+    df = bollinger(df)
 
-    if last["ema_fast"] > last["ema_slow"] and last["rsi"] > 52:
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # --------------------------
+    # RSI EXTREME FILTER
+    # --------------------------
+
+    if last["rsi"] > 70 or last["rsi"] < 30:
+        return None
+
+    # --------------------------
+    # EMA CROSS
+    # --------------------------
+
+    ema_cross_up = prev["ema9"] < prev["ema21"] and last["ema9"] > last["ema21"]
+
+    ema_cross_down = prev["ema9"] > prev["ema21"] and last["ema9"] < last["ema21"]
+
+    # --------------------------
+    # Candle Direction
+    # --------------------------
+
+    bullish = last["close"] > last["open"]
+
+    bearish = last["close"] < last["open"]
+
+    # --------------------------
+    # Bollinger Squeeze
+    # --------------------------
+
+    avg_width = df["width"].mean()
+
+    recent_width = df["width"].iloc[-5:].mean()
+
+    squeeze = recent_width < avg_width * 0.8
+
+    # --------------------------
+    # CALL
+    # --------------------------
+
+    if ema_cross_up and 45 <= last["rsi"] <= 65 and bullish:
+
+        if squeeze:
+            print(symbol, "HIGH CONFIDENCE CALL")
+
         return "CALL"
 
-    if last["ema_fast"] < last["ema_slow"] and last["rsi"] < 48:
+    # --------------------------
+    # PUT
+    # --------------------------
+
+    if ema_cross_down and 35 <= last["rsi"] <= 55 and bearish:
+
+        if squeeze:
+            print(symbol, "HIGH CONFIDENCE PUT")
+
         return "PUT"
 
     return None
