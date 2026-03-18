@@ -1,26 +1,26 @@
 # ─────────────────────────────────────────
 # Deriv Signal Bot — Python Dependencies
+# Requires Python 3.11 (set in render.yaml)
+# All packages have pre-built wheels — no
+# compilation required, fast install.
 # ─────────────────────────────────────────
 
-# Web server (Render keep-alive)
+# Web server
 flask==3.0.3
-gunicorn==22.0.0
+gunicorn==21.2.0
 
 # Deriv WebSocket connection
-websocket-client==1.8.0
+websocket-client==1.7.0
 
-# Data processing
-pandas==2.2.2
+# Data processing (pre-built wheels on 3.11)
+pandas==2.1.4
 numpy==1.26.4
 
-# Technical indicators (EMA, RSI, Bollinger Bands)
+# Technical indicators
 ta==0.11.0
 
 # HTTP requests (Telegram API)
-requests==2.32.3
+requests==2.31.0
 
-# Telegram bot
-python-telegram-bot==21.5
-
-# Environment variables from .env file
-python-dotenv==1.0.1
+# Environment variables
+python-dotenv==1.0.0
