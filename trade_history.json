@@ -1,3 +1,7 @@
 {
-  "trades": []
+    "trades": [],
+    "total_trades": 0,
+    "total_wins": 0,
+    "total_losses": 0,
+    "net_pnl": 0.0
 }
