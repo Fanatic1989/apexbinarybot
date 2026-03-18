@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 # Exposed for server.py /status route
 risk_manager = None
+last_signals  = []
 
 # ─────────────────────────────────────────
 # Schedule constants
@@ -173,7 +174,8 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                  f"Time left: {time_left_min:.0f}m | "
                  f"Balance: ${risk_manager.current_balance:.2f}")
 
-        for market in config.MARKETS:
+        active = config.get_active_markets()
+        for market in active:
             # Stop mid-scan if target hit
             if session_trades >= max_trades:
                 break
@@ -184,6 +186,19 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                     continue
 
                 signal = analyze_market(candles, market)
+                # Track last signal per market for dashboard
+                import bot as _b
+                _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
+                if signal:
+                    _b.last_signals.append({
+                        "market": market,
+                        "direction": signal.get("direction","NONE"),
+                        "confidence": signal.get("confidence","low"),
+                        "timestamp": __import__("datetime").datetime.utcnow().strftime("%H:%M:%S")
+                    })
+                    if len(_b.last_signals) > 30:
+                        _b.last_signals = _b.last_signals[-30:]
+
                 if not signal or signal.get("direction") == "NONE":
                     continue
                 if not signal.get("confirmed", False):
