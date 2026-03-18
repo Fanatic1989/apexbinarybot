@@ -97,11 +97,14 @@ def status():
     if hasattr(bot, "risk_manager") and bot.risk_manager:
         risk_summary = bot.risk_manager.get_summary()
     return jsonify({
-        "bot_running": bot_running,
-        "mode":        config.MODE,
-        "markets":     len(config.MARKETS),
-        "interval":    config.SCAN_INTERVAL,
-        "risk":        risk_summary
+        "bot_running":     bot_running,
+        "mode":            config.MODE,
+        "markets":         len(config.MARKETS),
+        "active_markets":  len(config.get_active_markets()),
+        "interval":        config.SCAN_INTERVAL,
+        "session":         config.get_current_session(),
+        "risk":            risk_summary,
+        "last_signals":    getattr(bot, "last_signals", [])
     })
 
 
