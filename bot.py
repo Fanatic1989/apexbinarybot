@@ -157,7 +157,7 @@ def run_bot():
                     # Check outcome
                     outcome = get_contract_result(contract_id)
                     if outcome:
-                        _handle_outcome(market, direction, stake, outcome, risk)
+                        _handle_outcome(market, direction, stake, outcome, risk, trade, signal)
 
             except Exception as e:
                 log.error(f"[{market}] Unexpected error during scan: {e}", exc_info=True)
@@ -171,9 +171,27 @@ def run_bot():
 # ─────────────────────────────────────────
 # Handle trade outcome
 # ─────────────────────────────────────────
-def _handle_outcome(market, direction, stake, outcome, risk: "RiskManager"):
-    status = outcome.get("status", "unknown")
-    profit = outcome.get("profit", 0)
+def _handle_outcome(market, direction, stake, outcome, risk: "RiskManager",
+                    trade: dict = None, signal: dict = None):
+    status     = outcome.get("status", "unknown")
+    profit     = outcome.get("profit", 0)
+    confidence = signal.get("confidence", "normal") if signal else "normal"
+    expiry     = signal.get("expiry", config.get_expiry(market)) if signal else config.get_expiry(market)
+    payout     = trade.get("payout", 0) if trade else 0
+    contract_id= trade.get("contract_id", "—") if trade else "—"
+
+    # ── Save to trade history ─────────────
+    _save_trade({
+        "contract_id": contract_id,
+        "symbol":      market,
+        "direction":   direction,
+        "stake":       stake,
+        "payout":      payout,
+        "result":      status,
+        "profit":      profit if status == "won" else -stake,
+        "expiry":      expiry,
+        "confidence":  confidence,
+    })
 
     if status == "won":
         log.info(f"[{market}] ✅ WON +${profit:.2f}")
@@ -194,6 +212,47 @@ def _handle_outcome(market, direction, stake, outcome, risk: "RiskManager"):
 
     else:
         log.warning(f"[{market}] Contract status unknown: {status}")
+
+
+
+# ─────────────────────────────────────────
+# Save trade to history file
+# ─────────────────────────────────────────
+def _save_trade(trade: dict):
+    """Write completed trade to trade_history.json."""
+    import os, json
+    history_file = "trade_history.json"
+    empty = {"trades": [], "total_trades": 0,
+             "total_wins": 0, "total_losses": 0, "net_pnl": 0.0}
+    try:
+        if os.path.exists(history_file):
+            with open(history_file, "r") as f:
+                data = json.load(f)
+        else:
+            data = empty
+        # ensure all keys exist
+        for k, v in empty.items():
+            if k not in data:
+                data[k] = v
+
+        from datetime import datetime
+        trade["time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        data["trades"].append(trade)
+        data["total_trades"] += 1
+        if trade.get("result") == "won":
+            data["total_wins"] += 1
+            data["net_pnl"]     = round(data["net_pnl"] + float(trade.get("profit", 0)), 2)
+        else:
+            data["total_losses"] += 1
+            data["net_pnl"]      = round(data["net_pnl"] - float(trade.get("stake", 0)), 2)
+        # keep last 500
+        if len(data["trades"]) > 500:
+            data["trades"] = data["trades"][-500:]
+        with open(history_file, "w") as f:
+            json.dump(data, f, indent=2)
+        log.info(f"[HISTORY] Saved: {trade['symbol']} {trade['direction']} {trade['result']}")
+    except Exception as e:
+        log.error(f"[HISTORY] Failed to save trade: {e}")
 
 
 # ─────────────────────────────────────────
