@@ -59,10 +59,10 @@ def sniper_confirm(candles: list, signal: dict) -> dict:
         score += 1
 
     # ── Confidence grading ────────────────
-    if score >= 4:
+    if score >= 3:
         confidence = "high"
         confirmed  = True
-    elif score >= 2:
+    elif score >= 1:
         confidence = "normal"
         confirmed  = True
     else:
