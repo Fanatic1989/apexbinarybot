@@ -26,9 +26,21 @@ services:
         value: "3"
       - key: DAILY_PROFIT_TARGET
         value: "5.0"
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SECRET_KEY
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: CURRENCY
+        value: "USD"
+      - key: COMPOUND
+        value: "false"
+      - key: COMPOUND_PERCENT
+        value: "50"
       - key: LOG_LEVEL
         value: INFO
