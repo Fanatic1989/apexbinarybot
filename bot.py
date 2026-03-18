@@ -18,6 +18,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Exposed for server.py /status route
+risk_manager = None
+
 
 # ─────────────────────────────────────────
 # Main bot loop
@@ -30,13 +33,35 @@ def run_bot():
     log.info(f"  Interval : {config.SCAN_INTERVAL}s")
     log.info("=" * 50)
 
-    # Initialise risk manager with current balance
-    balance = get_balance()
+    # Initialise risk manager — retry 5 times before giving up
+    balance = 0.0
+    for attempt in range(1, 6):
+        log.info(f"[BOT] Connecting to Deriv (attempt {attempt}/5) | "
+                 f"App ID: {config.DERIV_APP_ID} | Mode: {config.MODE.upper()}")
+        balance = get_balance()
+        if balance > 0:
+            break
+        log.warning(f"[BOT] Connection failed. Retrying in 10s...")
+        time.sleep(10)
+
     if balance <= 0:
-        log.error("Could not fetch balance. Check your token and app ID.")
+        log.error("=" * 50)
+        log.error("  COULD NOT CONNECT TO DERIV AFTER 5 ATTEMPTS")
+        log.error(f"  App ID used : {config.DERIV_APP_ID}")
+        log.error(f"  Mode        : {config.MODE.upper()}")
+        log.error(f"  Token set   : {'YES' if config.ACTIVE_TOKEN else 'NO'}")
+        log.error("  Fix:")
+        log.error("  1. https://api.deriv.com  -> Register app -> copy App ID")
+        log.error("  2. https://app.deriv.com/account/api-token -> copy token")
+        log.error("  3. Update DERIV_APP_ID + DEMO_TOKEN in Render env vars")
+        log.error("=" * 50)
         return
 
     risk = RiskManager(starting_balance=balance)
+
+    # Expose risk manager so server.py /status can read it
+    import bot as _self
+    _self.risk_manager = risk
     log.info(f"  Balance  : ${balance:.2f}")
     send_alert(f"🤖 Bot started | Mode: {config.MODE.upper()} | Balance: ${balance:.2f}")
 
