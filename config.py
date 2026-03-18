@@ -41,74 +41,64 @@ CANDLE_GRANULARITY = 60   # 1-minute candles
 CANDLE_COUNT       = 120  # number of candles to fetch
 
 # ─────────────────────────────────────────
-# Markets to scan — all 21 instruments
+# Markets to scan
 # ─────────────────────────────────────────
 MARKETS = [
     # Standard Volatility
-    "R_10",
-    "R_25",
-    "R_50",
-    "R_75",
-    "R_100",
-
+    "R_10", "R_25", "R_50", "R_75", "R_100",
     # Fast Tick (1-second)
-    "1HZ10V",
-    "1HZ25V",
-    "1HZ50V",
-    "1HZ75V",
-    "1HZ100V",
-
+    "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
     # Jump Indices
-    "JD10",
-    "JD25",
-    "JD50",
-    "JD75",
-    "JD100",
-
+    "JD10", "JD25", "JD50", "JD75", "JD100",
     # Boom & Crash
-    "BOOM500",
-    "BOOM1000",
-    "CRASH500",
-    "CRASH1000",
+    "BOOM500", "BOOM1000", "CRASH500", "CRASH1000",
 ]
 
 # ─────────────────────────────────────────
 # Expiry rules per market (in minutes)
 # ─────────────────────────────────────────
 EXPIRY_MAP = {
-    "R_10":      10,
-    "R_25":      10,
-    "R_50":       3,
-    "R_75":       3,
-    "R_100":      2,
-    "1HZ10V":     2,
-    "1HZ25V":     2,
-    "1HZ50V":     1,
-    "1HZ75V":     1,
-    "1HZ100V":    1,
-    "JD10":       2,
-    "JD25":       2,
-    "JD50":       1,
-    "JD75":       1,
-    "JD100":      1,
-    "BOOM500":    1,
-    "BOOM1000":   1,
-    "CRASH500":   1,
-    "CRASH1000":  1,
+    "R_10": 10, "R_25": 10, "R_50": 3, "R_75": 3, "R_100": 2,
+    "1HZ10V": 2, "1HZ25V": 2, "1HZ50V": 1, "1HZ75V": 1, "1HZ100V": 1,
+    "JD10": 2, "JD25": 2, "JD50": 1, "JD75": 1, "JD100": 1,
+    "BOOM500": 1, "BOOM1000": 1, "CRASH500": 1, "CRASH1000": 1,
 }
 
 def get_expiry(market: str) -> int:
-    """Return expiry duration in minutes for a given market."""
     return EXPIRY_MAP.get(market, 3)
 
 # ─────────────────────────────────────────
 # Risk management
 # ─────────────────────────────────────────
-STAKE_PERCENT        = float(os.getenv("STAKE_PERCENT", 1.0))   # % of balance per trade
-MAX_DAILY_LOSS_PCT   = float(os.getenv("MAX_DAILY_LOSS_PCT", 10.0))  # halt at 10% daily loss
-MAX_CONSECUTIVE_LOSS = int(os.getenv("MAX_CONSECUTIVE_LOSS", 3))     # pause after 3 losses
-DAILY_PROFIT_TARGET  = float(os.getenv("DAILY_PROFIT_TARGET", 5.0))  # stop at 5% daily gain
-PAUSE_DURATION       = int(os.getenv("PAUSE_DURATION", 1800))        # 30-min pause in seconds
+STAKE_PERCENT        = float(os.getenv("STAKE_PERCENT", 1.0))
+MAX_DAILY_LOSS_PCT   = float(os.getenv("MAX_DAILY_LOSS_PCT", 10.0))
+MAX_CONSECUTIVE_LOSS = int(os.getenv("MAX_CONSECUTIVE_LOSS", 3))
+DAILY_PROFIT_TARGET  = float(os.getenv("DAILY_PROFIT_TARGET", 5.0))
+PAUSE_DURATION       = int(os.getenv("PAUSE_DURATION", 1800))
+
+# ─────────────────────────────────────────
+# Account / trading settings
+# ─────────────────────────────────────────
+CURRENCY = os.getenv("CURRENCY", "USD")
+
+# Compounding — reinvest profits into stake sizing
+# When True, COMPOUND_PERCENT% of each win is added
+# back into the balance used for stake calculation.
+# e.g. Win $10, COMPOUND_PERCENT=50 -> $5 added to stake base
+COMPOUND         = os.getenv("COMPOUND", "false").lower() == "true"
+COMPOUND_PERCENT = float(os.getenv("COMPOUND_PERCENT", 50.0))
+
+# ─────────────────────────────────────────
+# Dashboard admin credentials
+# ─────────────────────────────────────────
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+
+# ─────────────────────────────────────────
+# Server / hosting
+# ─────────────────────────────────────────
+HOST = os.getenv("host", "0.0.0.0")
+PORT = int(os.getenv("port", 10000))
 
 # ─────────────────────────────────────────
 # Telegram (optional)
@@ -125,7 +115,9 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # Startup validation
 # ─────────────────────────────────────────
 def validate_config():
-    errors = []
+    errors   = []
+    warnings = []
+
     if not DERIV_APP_ID:
         errors.append("DERIV_APP_ID is not set")
     if MODE not in ("demo", "live"):
@@ -134,10 +126,21 @@ def validate_config():
         errors.append("No active token available")
     if SCAN_INTERVAL < 15:
         errors.append("SCAN_INTERVAL must be at least 15 seconds")
+    if not ADMIN_PASSWORD:
+        warnings.append("ADMIN_PASSWORD is not set — dashboard login is unprotected")
+
+    for w in warnings:
+        print(f"[CONFIG WARNING] {w}")
+    for e in errors:
+        print(f"[CONFIG ERROR]   {e}")
+
     if errors:
-        for e in errors:
-            print(f"[CONFIG ERROR] {e}")
         raise SystemExit("Fix config errors before starting the bot.")
-    print(f"[CONFIG] Mode: {MODE.upper()} | Markets: {len(MARKETS)} | Interval: {SCAN_INTERVAL}s")
+
+    print(
+        f"[CONFIG] OK | Mode: {MODE.upper()} | "
+        f"Markets: {len(MARKETS)} | Interval: {SCAN_INTERVAL}s | "
+        f"Currency: {CURRENCY} | Compound: {COMPOUND}"
+    )
 
 validate_config()
