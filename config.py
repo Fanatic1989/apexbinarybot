@@ -98,7 +98,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 # Server / hosting
 # ─────────────────────────────────────────
 HOST = os.getenv("host", "0.0.0.0")
-PORT = int(os.getenv("port", 10000))
+PORT = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
 
 # ─────────────────────────────────────────
 # Telegram (optional)
