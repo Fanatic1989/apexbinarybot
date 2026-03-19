@@ -82,7 +82,8 @@ def run_bot():
 
     # ── Run 24hr schedule ────────────────
     while True:
-        _run_session("SESSION 1", MAX_TRADES_S1, SESSION_1_HOURS)
+        try:
+          _run_session("SESSION 1", MAX_TRADES_S1, SESSION_1_HOURS)
 
         log.info(f"[BOT] 💤 REST period — {REST_HOURS} hour(s)")
         send_alert(f"💤 Rest period started ({REST_HOURS}h)\n"
@@ -95,7 +96,11 @@ def run_bot():
             risk_manager.current_balance = fresh
             log.info(f"[BOT] Balance refreshed after rest: ${fresh:.2f}")
 
-        _run_session("SESSION 2", MAX_TRADES_S2, SESSION_2_HOURS)
+          _run_session("SESSION 2", MAX_TRADES_S2, SESSION_2_HOURS)
+        except Exception as _e:
+            log.error(f"[BOT] Session error: {_e} — restarting in 60s")
+            time.sleep(60)
+            continue
 
         # Daily reset
         log.info("[BOT] 🔄 24hr cycle complete — resetting daily counters")
@@ -213,6 +218,15 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                     confidence=confidence,
                     stake=stake
                 )
+
+                # ── Signal only mode ─────
+                # Set SIGNAL_ONLY=true in Render env to
+                # watch signals without placing real trades
+                if os.getenv("SIGNAL_ONLY","false").lower() == "true":
+                    log.info(f"[{market}] 📡 SIGNAL ONLY — {direction} "
+                             f"(no trade placed)")
+                    session_trades += 1
+                    continue
 
                 # ── Place trade ───────────
                 trade = place_trade(
