@@ -262,6 +262,56 @@ def test_forex():
 
 
 # ─────────────────────────────────────────
+# Route: Test valid durations for forex
+# ─────────────────────────────────────────
+@app.route("/test-durations")
+@login_required
+def test_durations():
+    import websocket as _ws, json as _json
+    symbol = "frxEURUSD"
+    durations = [
+        (1,"m"),(2,"m"),(3,"m"),(5,"m"),(10,"m"),(15,"m"),(30,"m"),
+        (60,"m"),(1,"h"),(1,"d"),
+        (15,"s"),(30,"s"),(60,"s"),(90,"s"),(120,"s"),(300,"s"),
+    ]
+    results = {}
+    ws = None
+    try:
+        ws = _ws.create_connection(
+            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
+            timeout=15
+        )
+        ws.send(_json.dumps({"authorize": config.ACTIVE_TOKEN}))
+        auth = _json.loads(ws.recv())
+        if "error" in auth:
+            return jsonify({"error": auth["error"]["message"]})
+        for dur, unit in durations:
+            try:
+                ws.send(_json.dumps({
+                    "proposal": 1, "amount": 1, "basis": "stake",
+                    "contract_type": "CALL", "currency": "USD",
+                    "duration": dur, "duration_unit": unit,
+                    "symbol": symbol
+                }))
+                r = _json.loads(ws.recv())
+                key = f"{dur}{unit}"
+                if "proposal" in r:
+                    results[key] = f"✓ payout ${r['proposal']['payout']:.2f}"
+                else:
+                    results[key] = f"✗ {r.get('error',{}).get('message','No data')}"
+            except Exception as e:
+                results[f"{dur}{unit}"] = f"✗ {e}"
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    finally:
+        if ws:
+            try: ws.close()
+            except: pass
+    working = {k:v for k,v in results.items() if v.startswith("✓")}
+    return jsonify({"symbol": symbol, "working": working, "all": results})
+
+
+# ─────────────────────────────────────────
 # Route: Health check — NO login required
 # Render pings this to keep container alive
 # ─────────────────────────────────────────
