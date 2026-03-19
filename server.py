@@ -96,6 +96,10 @@ def status():
     risk_summary = None
     if hasattr(bot, "risk_manager") and bot.risk_manager:
         risk_summary = bot.risk_manager.get_summary()
+    staking_info = None
+    if hasattr(bot, "staking_engine") and bot.staking_engine:
+        staking_info = bot.staking_engine.get_info()
+
     return jsonify({
         "bot_running":     bot_running,
         "mode":            config.MODE,
@@ -104,6 +108,7 @@ def status():
         "interval":        config.SCAN_INTERVAL,
         "session":         config.get_current_session(),
         "risk":            risk_summary,
+        "staking":         staking_info,
         "last_signals":    getattr(bot, "last_signals", [])
     })
 
