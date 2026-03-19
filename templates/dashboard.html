@@ -423,241 +423,169 @@ function loadTrades() {
   api('/trades', d => {
     const trades = (d.trades||[]).slice().reverse().slice(0,100);
     if (!trades.length) return;
+
     const sessionStats = {};
+    const tbody = document.getElementById('trade-rows');
+
+    // Build a map of existing rows by contract_id
+    const existingRows = {};
+    tbody.querySelectorAll('tr[data-cid]').forEach(row => {
+      existingRows[row.dataset.cid] = row;
+    });
+
+    // Track which contract_ids we've seen this refresh
+    const seen = new Set();
     let html = '';
+
     trades.forEach(t => {
+      const cid     = String(t.contract_id||'');
+      seen.add(cid);
+
       const isForex = FOREX.includes(t.symbol||t.market);
       const typeTag = isForex
         ? '<span style="display:inline-block;background:rgba(167,139,250,0.1);color:#a78bfa;border:1px solid rgba(167,139,250,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:10px;font-weight:700">FOREX</span>'
         : '<span style="display:inline-block;background:rgba(100,116,139,0.1);color:#94a3b8;border:1px solid rgba(100,116,139,0.2);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:10px;font-weight:700">SYNTH</span>';
+
       const dir = t.direction==='CALL'
         ? '<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(0,245,160,0.1);color:#00f5a0;border:1px solid rgba(0,245,160,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">▲ CALL</span>'
         : '<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">▼ PUT</span>';
+
       const conf = t.confidence==='high'
         ? '<span style="display:inline-block;background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.3);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">🔥 HIGH</span>'
         : '<span style="display:inline-block;background:rgba(77,159,255,0.1);color:#4d9fff;border:1px solid rgba(77,159,255,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">NORMAL</span>';
-      const won = t.result === 'won';
-      const lost = t.result === 'lost';
-      const res = won
-        ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(0,245,160,0.12);color:#00f5a0;border:1px solid rgba(0,245,160,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.5px">✓ WIN</span>'
-        : lost
-        ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,77,109,0.12);color:#ff4d6d;border:1px solid rgba(255,77,109,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.5px">✗ LOSS</span>'
-        : '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(100,116,139,0.12);color:#64748b;border:1px solid rgba(100,116,139,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.5px">— OPEN</span>';
-      const pnl = parseFloat(t.profit||0);
-      const pnlHtml = pnl > 0
-        ? `<span style="display:inline-block;background:rgba(0,245,160,0.1);color:#00f5a0;border:1px solid rgba(0,245,160,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${Math.abs(pnl).toFixed(2)}</span>`
-        : pnl < 0
-        ? `<span style="display:inline-block;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">-$${Math.abs(pnl).toFixed(2)}</span>`
-        : '<span style="color:#64748b;font-family:var(--mono);font-size:11px">$0.00</span>';
 
-      // Build timer cell
+      // Result badge — keyed per contract
+      const won  = t.result === 'won';
+      const lost = t.result === 'lost';
+      const isOpenTx = !won && !lost;
+
+      const res = won
+        ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(0,245,160,0.12);color:#00f5a0;border:1px solid rgba(0,245,160,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">✓ WIN</span>'
+        : lost
+        ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,77,109,0.12);color:#ff4d6d;border:1px solid rgba(255,77,109,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">✗ LOSS</span>'
+        : `<span id="res-${cid}" style="display:inline-block;background:rgba(100,116,139,0.1);color:#64748b;border:1px solid rgba(100,116,139,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px">— OPEN</span>`;
+
+      // P&L
+      const pnl       = parseFloat(t.profit||0);
+      const potPayout = parseFloat(t.payout||0) - parseFloat(t.stake||0);
+      let pnlHtml;
+      if (isOpenTx && potPayout > 0) {
+        pnlHtml = `<span id="pnl-${cid}" style="display:inline-block;background:rgba(255,179,71,0.08);color:#ffb347;border:1px solid rgba(255,179,71,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${potPayout.toFixed(2)}?</span>`;
+      } else if (pnl > 0) {
+        pnlHtml = `<span style="display:inline-block;background:rgba(0,245,160,0.1);color:#00f5a0;border:1px solid rgba(0,245,160,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${Math.abs(pnl).toFixed(2)}</span>`;
+      } else if (pnl < 0) {
+        pnlHtml = `<span style="display:inline-block;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">-$${Math.abs(pnl).toFixed(2)}</span>`;
+      } else {
+        pnlHtml = '<span style="color:#64748b;font-family:var(--mono);font-size:11px">—</span>';
+      }
+
+      // Timer — uses contract_id so each trade has its own timer
       const tradeTime = t.time ? new Date(t.time.replace(' UTC','Z')) : null;
       const expiryMin = parseFloat(t.expiry||0);
       const settleAt  = tradeTime ? new Date(tradeTime.getTime() + expiryMin*60000) : null;
-      const tid       = 'timer-' + (t.contract_id||Math.random().toString(36).slice(2));
       const nowMs     = Date.now();
-      const settled   = t.result === 'won' || t.result === 'lost';
       const leftMs    = settleAt ? (settleAt - nowMs) : -1;
 
       let timerHtml;
       if (!settleAt) {
         timerHtml = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">—</span>';
-      } else if (settled && leftMs <= 0) {
-        // Already settled — show the final result indicator
-        const resultIcon = t.result === 'won'
-          ? '<span style="font-family:var(--mono);font-size:12px;color:#00f5a0;font-weight:700">✓ WIN</span>'
-          : '<span style="font-family:var(--mono);font-size:12px;color:#ff4d6d;font-weight:700">✗ LOSS</span>';
-        timerHtml = resultIcon;
+      } else if (!isOpenTx) {
+        // Settled — show final result in timer col too
+        timerHtml = won
+          ? '<span style="font-family:var(--mono);font-size:11px;color:#00f5a0">✓ Done</span>'
+          : '<span style="font-family:var(--mono);font-size:11px;color:#ff4d6d">✗ Done</span>';
       } else if (leftMs <= 0) {
-        timerHtml = '<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
+        timerHtml = '<span style="color:#ffb347;font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
       } else {
-        // Active countdown — always show regardless of result status
-        timerHtml = `<span id="${tid}" data-settle="${settleAt.getTime()}" data-duration="${expiryMin}" data-result="${t.result||'open'}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:#00f5a0">—</span>`;
+        timerHtml = `<span id="tmr-${cid}" data-settle="${settleAt.getTime()}" data-duration="${expiryMin}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:#00f5a0">—</span>`;
       }
 
-      html += `<tr data-contract="${t.contract_id||''}">
-        <td style="font-family:var(--mono);font-size:10px">${t.time||'—'}</td>
-        <td><code>${t.symbol||t.market||'—'}</code></td>
-        <td>${typeTag}</td>
-        <td>${dir}</td>
-        <td style="font-family:var(--mono)">${t.expiry||'—'}m</td>
-        <td>${timerHtml}</td>
-        <td style="font-family:var(--mono)">$${parseFloat(t.stake||0).toFixed(2)}</td>
-        <td style="font-family:var(--mono)">$${parseFloat(t.payout||0).toFixed(2)}</td>
-        <td>${conf}</td>
-        <td>${res}</td>
-        <td>${pnlHtml}</td>
-      </tr>`;
+      // If row already exists in DOM, only update the dynamic cells (result, pnl, timer)
+      if (existingRows[cid] && isOpenTx) {
+        // Row exists and still open — just update timer (tickTimers handles it)
+        // Don't rebuild — avoids flicker
+        return;
+      }
 
       // Build session stats
       const stype = isForex ? 'Forex' : 'Synthetic';
       if (!sessionStats[stype]) sessionStats[stype] = {trades:0,wins:0,losses:0,pnl:0};
       sessionStats[stype].trades++;
-      if (t.result==='won') { sessionStats[stype].wins++; sessionStats[stype].pnl += Math.abs(pnl); }
-      else { sessionStats[stype].losses++; sessionStats[stype].pnl -= parseFloat(t.stake||0); }
+      if (won)  { sessionStats[stype].wins++;   sessionStats[stype].pnl += Math.abs(pnl); }
+      if (lost) { sessionStats[stype].losses++; sessionStats[stype].pnl -= parseFloat(t.stake||0); }
+
+      html += `<tr data-cid="${cid}">
+        <td style="font-family:var(--mono);font-size:10px">${t.time||'—'}</td>
+        <td><code style="color:var(--blue);font-size:11px">${t.symbol||t.market||'—'}</code></td>
+        <td>${typeTag}</td>
+        <td>${dir}</td>
+        <td style="font-family:var(--mono)">${t.expiry||'—'}m</td>
+        <td id="tmrcell-${cid}">${timerHtml}</td>
+        <td style="font-family:var(--mono)">$${parseFloat(t.stake||0).toFixed(2)}</td>
+        <td style="font-family:var(--mono)">$${parseFloat(t.payout||0).toFixed(2)}</td>
+        <td>${conf}</td>
+        <td id="rescell-${cid}">${res}</td>
+        <td id="pnlcell-${cid}">${pnlHtml}</td>
+      </tr>`;
     });
 
-    document.getElementById('trade-rows').innerHTML = html;
-    buildSessionTable(sessionStats);
+    // For settled trades — update existing rows in place without full rebuild
+    trades.forEach(t => {
+      const cid  = String(t.contract_id||'');
+      const won  = t.result === 'won';
+      const lost = t.result === 'lost';
+      if ((!won && !lost)) return;
 
-    // Summary pills above table
-    const total = trades.length;
-    const wins  = trades.filter(t=>t.result==='won').length;
-    const losses= trades.filter(t=>t.result==='lost').length;
-    const wr    = total ? ((wins/total)*100).toFixed(1) : '0';
-    const wrCol = parseFloat(wr)>=65?'#00f5a0':parseFloat(wr)>=50?'#ffb347':'#ff4d6d';
+      const resCell = document.getElementById('rescell-'+cid);
+      const pnlCell = document.getElementById('pnlcell-'+cid);
+      const tmrCell = document.getElementById('tmrcell-'+cid);
+
+      if (resCell && resCell.textContent.includes('OPEN')) {
+        resCell.innerHTML = won
+          ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(0,245,160,0.12);color:#00f5a0;border:1px solid rgba(0,245,160,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">✓ WIN</span>'
+          : '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,77,109,0.12);color:#ff4d6d;border:1px solid rgba(255,77,109,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">✗ LOSS</span>';
+      }
+      if (pnlCell && pnlCell.textContent.includes('?')) {
+        const pnl = parseFloat(t.profit||0);
+        pnlCell.innerHTML = pnl > 0
+          ? `<span style="display:inline-block;background:rgba(0,245,160,0.1);color:#00f5a0;border:1px solid rgba(0,245,160,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${Math.abs(pnl).toFixed(2)}</span>`
+          : `<span style="display:inline-block;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">-$${Math.abs(pnl).toFixed(2)}</span>`;
+      }
+      if (tmrCell) {
+        tmrCell.innerHTML = won
+          ? '<span style="font-family:var(--mono);font-size:11px;color:#00f5a0">✓ Done</span>'
+          : '<span style="font-family:var(--mono);font-size:11px;color:#ff4d6d">✗ Done</span>';
+      }
+    });
+
+    // Only update DOM if we have new rows to add
+    if (html) {
+      const noData = tbody.querySelector('td[colspan]');
+      if (noData) {
+        tbody.innerHTML = html;
+      } else {
+        tbody.insertAdjacentHTML('afterbegin', html);
+      }
+    }
+
+    // Summary pills
+    const total   = trades.length;
+    const wins    = trades.filter(t=>t.result==='won').length;
+    const losses  = trades.filter(t=>t.result==='lost').length;
+    const open    = trades.filter(t=>t.result==='open'||t.result==='unresolved').length;
+    const settled = wins + losses;
+    const wr      = settled ? ((wins/settled)*100).toFixed(1) : '0';
+    const wrCol   = parseFloat(wr)>=65?'#00f5a0':parseFloat(wr)>=50?'#ffb347':'#ff4d6d';
+    const openPill= open > 0
+      ? `<span style="background:rgba(255,179,71,0.1);border:1px solid rgba(255,179,71,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#ffb347">${open} OPEN</span>`
+      : '';
     document.getElementById('trade-summary').innerHTML = `
       <span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#94a3b8">${total} TRADES</span>
       <span style="background:rgba(0,245,160,0.1);border:1px solid rgba(0,245,160,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#00f5a0">${wins} WIN</span>
       <span style="background:rgba(255,77,109,0.1);border:1px solid rgba(255,77,109,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#ff4d6d">${losses} LOSS</span>
-      <span style="background:rgba(255,179,71,0.1);border:1px solid rgba(255,179,71,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:${wrCol}">${wr}% WIN RATE</span>
-    `;
+      ${openPill}
+      <span style="background:rgba(255,179,71,0.1);border:1px solid rgba(255,179,71,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:${wrCol}">${wr}% WIN RATE</span>`;
+
+    buildSessionTable(sessionStats);
   });
 }
-
-// ── Session table ─────────────────────────
-function buildSessionTable(stats) {
-  if (!Object.keys(stats).length) return;
-  let html = '';
-  Object.entries(stats).forEach(([name, s]) => {
-    const wr   = s.trades ? ((s.wins/s.trades)*100).toFixed(1) : '0';
-    const pnl  = s.pnl.toFixed(2);
-    const color = parseFloat(pnl)>=0 ? 'var(--green)' : 'var(--red)';
-    const wrCol = parseFloat(wr)>=60 ? 'var(--green)' : parseFloat(wr)>=50 ? 'var(--amber)' : 'var(--red)';
-    html += `<tr>
-      <td style="font-family:var(--mono);color:var(--text)">${name}</td>
-      <td style="font-family:var(--mono)">${s.trades}</td>
-      <td style="color:var(--green)">${s.wins}</td>
-      <td style="color:var(--red)">${s.losses}</td>
-      <td style="font-family:var(--mono);color:${wrCol}">${wr}%</td>
-      <td style="font-family:var(--mono);color:${color}">${parseFloat(pnl)>=0?'+$':'-$'}${Math.abs(pnl).toFixed(2)}</td>
-    </tr>`;
-  });
-  document.getElementById('session-rows').innerHTML = html;
-}
-
-// ── Market grid ───────────────────────────
-function buildMarketGrid(signals) {
-  if (!signals || !signals.length) return;
-  let html = '';
-  signals.forEach(s => {
-    const dir = s.direction;
-    const cls = dir==='CALL' ? 'sig-call' : dir==='PUT' ? 'sig-put' : 'sig-none';
-    const label = dir==='CALL' ? '▲ CALL' : dir==='PUT' ? '▼ PUT' : '—';
-    const isForex = FOREX.includes(s.market);
-    const typeDot = `<span style="width:6px;height:6px;border-radius:50%;background:${isForex?'var(--purple)':'var(--muted)'};display:inline-block;margin-right:4px"></span>`;
-    html += `<div class="market-card">
-      <span class="market-name">${typeDot}<code>${s.market}</code></span>
-      <span class="market-signal ${cls}">${label}</span>
-    </div>`;
-  });
-  document.getElementById('market-grid').innerHTML = html;
-}
-
-// ── Log ───────────────────────────────────
-function loadLog() {
-  api('/log', d => {
-    const box = document.getElementById('log-box');
-    const lines = d.lines||[];
-    let html = '';
-    lines.forEach(l => {
-      let cls = 'info';
-      if (l.includes('ERROR'))   cls = 'err';
-      else if (l.includes('WARNING')||l.includes('WARN')) cls = 'warn';
-      else if (l.includes('WIN')||l.includes('✅')) cls = 'ok';
-      else if (l.includes('LOSS')||l.includes('❌')) cls = 'err';
-      const safe = l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      html += `<div class="${cls}">${safe}</div>`;
-    });
-    box.innerHTML = html || '<span style="color:var(--muted)">No activity yet</span>';
-    box.scrollTop = box.scrollHeight;
-  });
-}
-
-// ── Helpers ───────────────────────────────
-function setText(id, val){ const el=document.getElementById(id); if(el) el.textContent=val; }
-
-function setPill(id, text, cls) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.className = 'pill '+cls;
-  const dot = el.querySelector('.dot');
-  el.textContent = text;
-  if (dot) el.prepend(dot);
-}
-
-function getSessionPill(sess) {
-  if (sess.includes('OVERLAP')) return 'pill-green';
-  if (sess.includes('LONDON') || sess.includes('NEW_YORK')) return 'pill-blue';
-  if (sess.includes('ASIAN')) return 'pill-amber';
-  return 'pill-red';
-}
-
-function toast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.display = 'block';
-  setTimeout(()=>{ t.style.display='none'; }, 2500);
-}
-
-function loadAll() {
-  loadStatus(); loadTrades(); loadLog();
-  document.getElementById('last-refresh').textContent =
-    'Last refresh: '+new Date().toLocaleTimeString();
-}
-
-loadAll();
-setInterval(loadAll, 5000);
-
-// ── Live countdown timers ─────────────────
-function tickTimers() {
-  const now = Date.now();
-  document.querySelectorAll('[data-settle]').forEach(el => {
-    const settle  = parseInt(el.dataset.settle);
-    const left    = settle - now;
-    const totalMs = settle - (settle - parseFloat(el.dataset.total||0));
-
-    if (left <= 0) {
-      el.removeAttribute('data-settle');
-      el.innerHTML = '<span style="color:var(--amber);animation:blink 1s infinite">Settling...</span>';
-      return;
-    }
-
-    const mins   = Math.floor(left / 60000);
-    const secs   = Math.floor((left % 60000) / 1000);
-    const tenths = Math.floor((left % 1000) / 100);
-    const timeStr = mins > 0
-      ? `${mins}m ${secs.toString().padStart(2,'0')}s`
-      : `${secs}.${tenths}s`;
-
-    // Progress bar width
-    const pct = Math.max(0, Math.min(100, (left / (parseFloat(el.dataset.duration||1)*60000)) * 100));
-
-    // Color gradient: green → amber → red
-    let color, barColor;
-    if (left > 60000)      { color = '#00f5a0'; barColor = '#00f5a0'; }
-    else if (left > 30000) { color = '#ffb347'; barColor = '#ffb347'; }
-    else if (left > 10000) { color = '#ff9100'; barColor = '#ff9100'; }
-    else                   { color = '#ff4d6d'; barColor = '#ff4d6d'; }
-
-    el.style.color = color;
-    el.innerHTML = `
-      <div style="text-align:center">
-        <div style="font-size:12px;font-weight:700;font-family:var(--mono)">${timeStr}</div>
-        <div style="width:60px;height:3px;background:rgba(255,255,255,0.1);border-radius:2px;margin:3px auto 0">
-          <div style="width:${pct}%;height:3px;background:${barColor};border-radius:2px;transition:width 0.1s"></div>
-        </div>
-      </div>`;
-  });
-}
-
-// Add blink animation
-const style = document.createElement('style');
-style.textContent = '@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}';
-document.head.appendChild(style);
-
-setInterval(tickTimers, 100);
-tickTimers();
-</script>
-</body>
-</html>
