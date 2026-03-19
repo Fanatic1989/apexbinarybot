@@ -249,6 +249,27 @@
     </div>
   </div>
 
+  <!-- Staking info -->
+  <div class="card" id="staking-card" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <span class="card-title" style="margin-bottom:0">Staking strategy</span>
+      <span id="staking-strategy-pill" class="pill pill-amber">—</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:12px">
+      <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;border:1px solid var(--border)">
+        <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--amber)" id="sk-current">—</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.06em">Next stake</div>
+      </div>
+      <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;border:1px solid var(--border)">
+        <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--text)" id="sk-base">—</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.06em">Base unit</div>
+      </div>
+      <div style="background:var(--bg3);border-radius:8px;padding:10px 12px;border:1px solid var(--border);grid-column:span 2">
+        <div style="font-size:11px;color:var(--muted);line-height:1.6" id="sk-desc">—</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Trade history -->
   <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
@@ -369,6 +390,30 @@ function loadStatus() {
 
     // Last signals for market grid
     if (d.last_signals) buildMarketGrid(d.last_signals);
+
+    // Staking info
+    if (d.staking) {
+      document.getElementById('staking-card').style.display = 'block';
+      const s = d.staking;
+      const sNames = {
+        flat:'Flat % Stake', dalembert:"D'Alembert",
+        oscar:"Oscar's Grind", strategy1326:'1-3-2-6', martingale:'Martingale'
+      };
+      const sDesc = {
+        flat:'Fixed percentage of balance per trade. Safe and consistent.',
+        dalembert:'Increase stake by 1 unit after loss, decrease by 1 after win. Low risk, balanced.',
+        oscar:"Only increase stake after a win that completes a profit unit. Grind small consistent gains.",
+        strategy1326:'Follow 1→3→2→6 unit sequence on wins. Reset on any loss. Rides winning streaks.',
+        martingale:'Double stake after every loss. Resets on win. High risk — demo only.'
+      };
+      const sColors = {flat:'pill-blue', dalembert:'pill-green', oscar:'pill-green',
+                       strategy1326:'pill-amber', martingale:'pill-red'};
+      document.getElementById('staking-strategy-pill').textContent = sNames[s.strategy] || s.strategy.toUpperCase();
+      document.getElementById('staking-strategy-pill').className = 'pill ' + (sColors[s.strategy]||'pill-amber');
+      document.getElementById('sk-current').textContent = '$' + s.current_stake;
+      document.getElementById('sk-base').textContent   = '$' + s.base_stake;
+      document.getElementById('sk-desc').textContent   = sDesc[s.strategy] || '';
+    }
   });
 }
 
