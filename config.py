@@ -49,7 +49,7 @@ SYNTHETIC_MARKETS = [
 # Deriv binary options uses frx prefix
 # ─────────────────────────────────────────
 FOREX_MARKETS = [
-    "frxEURUSD",   # Euro / US Dollar
+    "frxEURUSD",   # Euro / US Dollar        — most liquid
     "frxGBPUSD",   # British Pound / US Dollar
     "frxUSDJPY",   # US Dollar / Japanese Yen
     "frxAUDUSD",   # Australian Dollar / US Dollar
@@ -57,10 +57,11 @@ FOREX_MARKETS = [
     "frxUSDCHF",   # US Dollar / Swiss Franc
     "frxEURGBP",   # Euro / British Pound
     "frxEURJPY",   # Euro / Japanese Yen
+    "frxGBPJPY",   # British Pound / Japanese Yen
 ]
 
-# Asian session only pairs (most liquid during Asian hours)
-ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD"]
+# Asian session only pairs
+ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD", "frxEURJPY"]
 
 # ─────────────────────────────────────────
 # Session windows (UTC hours)
