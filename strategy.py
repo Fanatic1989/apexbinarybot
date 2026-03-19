@@ -8,6 +8,52 @@ from sniper_filter import sniper_confirm
 
 log = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────
+# HTF cache — refresh every 30 minutes
+# Prevents opening a new WebSocket every scan
+# ─────────────────────────────────────────
+_htf_cache = {}           # {symbol: (candles, timestamp)}
+_HTF_CACHE_TTL = 1800     # 30 minutes in seconds
+
+def _get_htf_trend_cached(market):
+    import time as _time
+    now = _time.time()
+    if market in _htf_cache:
+        candles, ts = _htf_cache[market]
+        if now - ts < _HTF_CACHE_TTL:
+            return _compute_htf_trend(candles)
+    # Cache miss or expired — fetch fresh
+    # Use retries=1 only so a bad symbol doesn't block the scan for 30s
+    try:
+        candles = get_htf_candles(market, retries=1)
+    except Exception as e:
+        log.warning(f"[STRATEGY] HTF fetch failed for {market}: {e}")
+        return 0
+    if candles and len(candles) >= 25:
+        _htf_cache[market] = (candles, now)
+        return _compute_htf_trend(candles)
+    else:
+        # Cache a negative result so we don't retry every scan
+        _htf_cache[market] = ([], now - _HTF_CACHE_TTL + 300)
+        log.warning(f"[STRATEGY] HTF no data for {market} — skipping HTF filter")
+        return 0   # 0 = unclear = don't block signal
+
+def _compute_htf_trend(candles):
+    try:
+        if not candles or len(candles) < 25:
+            return 0
+        df = _to_df(candles)
+        ema9  = _ema(df["close"], 9).iloc[-1]
+        ema21 = _ema(df["close"], 21).iloc[-1]
+        if ema9 > ema21 * 1.0001:
+            return 1
+        elif ema9 < ema21 * 0.9999:
+            return -1
+        return 0
+    except Exception as e:
+        log.warning(f"[STRATEGY] HTF compute error: {e}")
+        return 0
+
 
 def _ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -37,27 +83,7 @@ def _to_df(candles):
     df.reset_index(drop=True, inplace=True)
     return df
 
-def _get_htf_trend(market):
-    """
-    Returns 1 (uptrend), -1 (downtrend), or 0 (unclear)
-    based on 1-hour EMA9 vs EMA21.
-    This is the key filter that pushes win rate to 75-85%.
-    """
-    try:
-        htf = get_htf_candles(market)
-        if not htf or len(htf) < 25:
-            return 0
-        df = _to_df(htf)
-        ema9  = _ema(df["close"], 9).iloc[-1]
-        ema21 = _ema(df["close"], 21).iloc[-1]
-        if ema9 > ema21 * 1.0001:
-            return 1
-        elif ema9 < ema21 * 0.9999:
-            return -1
-        return 0
-    except Exception as e:
-        log.warning(f"[STRATEGY] HTF trend error for {market}: {e}")
-        return 0
+# _get_htf_trend replaced by _get_htf_trend_cached above
 
 
 def analyze_market(candles, market):
@@ -122,7 +148,7 @@ def analyze_market(candles, market):
     # For synthetics: skip HTF filter (random anyway)
     htf_trend = 0
     if config.is_forex(market):
-        htf_trend = _get_htf_trend(market)
+        htf_trend = _get_htf_trend_cached(market)
         # If HTF trend is clear, only take aligned signals
         # This is the key to 75-85% win rate on forex
 
