@@ -100,6 +100,13 @@ def status():
     if hasattr(bot, "staking_engine") and bot.staking_engine:
         staking_info = bot.staking_engine.get_info()
 
+    # AI strategy performance
+    ai_info = None
+    try:
+        from strategy_ai import tracker
+        ai_info = tracker.get_summary()
+    except: pass
+
     return jsonify({
         "bot_running":     bot_running,
         "mode":            config.MODE,
@@ -109,7 +116,8 @@ def status():
         "session":         config.get_current_session(),
         "risk":            risk_summary,
         "staking":         staking_info,
-        "last_signals":    getattr(bot, "last_signals", [])
+        "last_signals":    getattr(bot, "last_signals", []),
+        "ai_strategy":     ai_info
     })
 
 
