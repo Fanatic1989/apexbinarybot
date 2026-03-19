@@ -124,8 +124,9 @@
       border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.06em
     }
     tbody td{padding:9px 10px;border-bottom:1px solid rgba(255,255,255,0.04);color:#94a3b8}
-    tbody tr:hover td{background:rgba(255,255,255,0.02)}
+    tbody tr:hover td{background:rgba(0,245,160,0.03) !important}
     tbody tr:last-child td{border-bottom:none}
+    tbody tr:nth-child(even) td{background:rgba(255,255,255,0.015)}
     code{font-family:var(--mono);color:var(--blue);font-size:11px}
 
     /* ── Log ── */
@@ -250,7 +251,10 @@
 
   <!-- Trade history -->
   <div class="card">
-    <div class="card-title">Trade history</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <span class="card-title" style="margin-bottom:0">Trade history</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap" id="trade-summary"></div>
+    </div>
     <div class="tbl-wrap">
       <table>
         <thead>
@@ -378,21 +382,27 @@ function loadTrades() {
     trades.forEach(t => {
       const isForex = FOREX.includes(t.symbol||t.market);
       const typeTag = isForex
-        ? '<span style="color:var(--purple);font-size:10px;font-family:var(--mono)">FOREX</span>'
-        : '<span style="color:var(--muted);font-size:10px;font-family:var(--mono)">SYNTH</span>';
+        ? '<span style="display:inline-block;background:rgba(167,139,250,0.1);color:#a78bfa;border:1px solid rgba(167,139,250,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:10px;font-weight:700">FOREX</span>'
+        : '<span style="display:inline-block;background:rgba(100,116,139,0.1);color:#94a3b8;border:1px solid rgba(100,116,139,0.2);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:10px;font-weight:700">SYNTH</span>';
       const dir = t.direction==='CALL'
-        ? '<span class="call-tag">▲ CALL</span>'
-        : '<span class="put-tag">▼ PUT</span>';
+        ? '<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(0,245,160,0.1);color:#00f5a0;border:1px solid rgba(0,245,160,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">▲ CALL</span>'
+        : '<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">▼ PUT</span>';
       const conf = t.confidence==='high'
-        ? '<span class="high-tag">🔥 HIGH</span>'
-        : '<span class="norm-tag">NORMAL</span>';
-      const res = t.result==='won'
-        ? '<span class="win-tag">✅ WIN</span>'
-        : '<span class="loss-tag">❌ LOSS</span>';
+        ? '<span style="display:inline-block;background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.3);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">🔥 HIGH</span>'
+        : '<span style="display:inline-block;background:rgba(77,159,255,0.1);color:#4d9fff;border:1px solid rgba(77,159,255,0.25);padding:3px 9px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">NORMAL</span>';
+      const won = t.result === 'won';
+      const lost = t.result === 'lost';
+      const res = won
+        ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(0,245,160,0.12);color:#00f5a0;border:1px solid rgba(0,245,160,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.5px">✓ WIN</span>'
+        : lost
+        ? '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,77,109,0.12);color:#ff4d6d;border:1px solid rgba(255,77,109,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.5px">✗ LOSS</span>'
+        : '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(100,116,139,0.12);color:#64748b;border:1px solid rgba(100,116,139,0.3);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.5px">— OPEN</span>';
       const pnl = parseFloat(t.profit||0);
-      const pnlHtml = pnl>=0
-        ? `<span class="win-tag">+$${Math.abs(pnl).toFixed(2)}</span>`
-        : `<span class="loss-tag">-$${Math.abs(pnl).toFixed(2)}</span>`;
+      const pnlHtml = pnl > 0
+        ? `<span style="display:inline-block;background:rgba(0,245,160,0.1);color:#00f5a0;border:1px solid rgba(0,245,160,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${Math.abs(pnl).toFixed(2)}</span>`
+        : pnl < 0
+        ? `<span style="display:inline-block;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">-$${Math.abs(pnl).toFixed(2)}</span>`
+        : '<span style="color:#64748b;font-family:var(--mono);font-size:11px">$0.00</span>';
 
       html += `<tr>
         <td style="font-family:var(--mono);font-size:10px">${t.time||'—'}</td>
@@ -417,6 +427,19 @@ function loadTrades() {
 
     document.getElementById('trade-rows').innerHTML = html;
     buildSessionTable(sessionStats);
+
+    // Summary pills above table
+    const total = trades.length;
+    const wins  = trades.filter(t=>t.result==='won').length;
+    const losses= trades.filter(t=>t.result==='lost').length;
+    const wr    = total ? ((wins/total)*100).toFixed(1) : '0';
+    const wrCol = parseFloat(wr)>=65?'#00f5a0':parseFloat(wr)>=50?'#ffb347':'#ff4d6d';
+    document.getElementById('trade-summary').innerHTML = `
+      <span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#94a3b8">${total} TRADES</span>
+      <span style="background:rgba(0,245,160,0.1);border:1px solid rgba(0,245,160,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#00f5a0">${wins} WIN</span>
+      <span style="background:rgba(255,77,109,0.1);border:1px solid rgba(255,77,109,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#ff4d6d">${losses} LOSS</span>
+      <span style="background:rgba(255,179,71,0.1);border:1px solid rgba(255,179,71,0.25);padding:3px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;color:${wrCol}">${wr}% WIN RATE</span>
+    `;
   });
 }
 
