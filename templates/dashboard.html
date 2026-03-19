@@ -285,6 +285,7 @@
             <th>Type</th>
             <th>Direction</th>
             <th>Expiry</th>
+            <th>Timer</th>
             <th>Stake</th>
             <th>Payout</th>
             <th>Confidence</th>
@@ -449,12 +450,33 @@ function loadTrades() {
         ? `<span style="display:inline-block;background:rgba(255,77,109,0.1);color:#ff4d6d;border:1px solid rgba(255,77,109,0.25);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">-$${Math.abs(pnl).toFixed(2)}</span>`
         : '<span style="color:#64748b;font-family:var(--mono);font-size:11px">$0.00</span>';
 
-      html += `<tr>
+      // Build timer cell
+      const tradeTime = t.time ? new Date(t.time.replace(' UTC','Z')) : null;
+      const expiryMin = parseFloat(t.expiry||0);
+      const settleAt  = tradeTime ? new Date(tradeTime.getTime() + expiryMin*60000) : null;
+      const isOpen    = t.result === 'open' || t.result === 'unresolved';
+      const tid       = 'timer-' + (t.contract_id||Math.random().toString(36).slice(2));
+
+      let timerHtml;
+      if (!isOpen || !settleAt) {
+        timerHtml = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">—</span>';
+      } else {
+        const nowMs   = Date.now();
+        const leftMs  = settleAt - nowMs;
+        if (leftMs <= 0) {
+          timerHtml = '<span style="color:var(--amber);font-family:var(--mono);font-size:11px">Settling...</span>';
+        } else {
+          timerHtml = `<span id="${tid}" data-settle="${settleAt.getTime()}" style="font-family:var(--mono);font-size:11px;color:var(--amber)">—</span>`;
+        }
+      }
+
+      html += `<tr data-contract="${t.contract_id||''}">
         <td style="font-family:var(--mono);font-size:10px">${t.time||'—'}</td>
         <td><code>${t.symbol||t.market||'—'}</code></td>
         <td>${typeTag}</td>
         <td>${dir}</td>
         <td style="font-family:var(--mono)">${t.expiry||'—'}m</td>
+        <td>${timerHtml}</td>
         <td style="font-family:var(--mono)">$${parseFloat(t.stake||0).toFixed(2)}</td>
         <td style="font-family:var(--mono)">$${parseFloat(t.payout||0).toFixed(2)}</td>
         <td>${conf}</td>
@@ -581,6 +603,35 @@ function loadAll() {
 
 loadAll();
 setInterval(loadAll, 5000);
+
+// ── Live countdown timers ─────────────────
+function tickTimers() {
+  const now = Date.now();
+  document.querySelectorAll('[data-settle]').forEach(el => {
+    const settle = parseInt(el.dataset.settle);
+    const left   = settle - now;
+    if (left <= 0) {
+      el.textContent = 'Settling...';
+      el.style.color = 'var(--amber)';
+      return;
+    }
+    const mins = Math.floor(left / 60000);
+    const secs = Math.floor((left % 60000) / 1000);
+    el.textContent = mins > 0
+      ? `${mins}m ${secs.toString().padStart(2,'0')}s`
+      : `${secs}s`;
+    // Color changes as time runs out
+    if (left < 30000) {
+      el.style.color = 'var(--red)';
+    } else if (left < 60000) {
+      el.style.color = 'var(--amber)';
+    } else {
+      el.style.color = '#00f5a0';
+    }
+  });
+}
+setInterval(tickTimers, 1000);
+tickTimers();
 </script>
 </body>
 </html>
