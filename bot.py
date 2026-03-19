@@ -6,6 +6,7 @@ from datetime import datetime
 
 import config
 from deriv_api import get_candles, get_balance, place_trade, get_contract_result
+from staking import StakingEngine
 from strategy import analyze_market
 from risk_manager import RiskManager
 from telegram_bot import send_signal, send_alert
@@ -21,8 +22,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Exposed for server.py /status route
-risk_manager = None
-last_signals  = []
+risk_manager   = None
+last_signals   = []
+staking_engine = None
 
 # ─────────────────────────────────────────
 # Schedule constants
@@ -203,8 +205,8 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                 confidence = signal.get("confidence", "normal")
                 expiry     = config.get_expiry(market)
 
-                # ── Compounding stake ─────
-                stake = _calculate_stake()
+                # ── Staking engine ────────
+                stake = staking_engine.get_stake() if staking_engine else _calculate_stake()
 
                 log.info(f"[{market}] ⚡ {direction} | "
                          f"Conf: {confidence} | "
@@ -248,11 +250,32 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                 # ── Wait for settlement ───
                 _wait_for_settlement(expiry)
 
-                # ── Get result ────────────
-                outcome = get_contract_result(contract_id)
-                if outcome:
+                # ── Get result with retry ──
+                outcome = None
+                for _attempt in range(5):
+                    outcome = get_contract_result(contract_id)
+                    if outcome and outcome.get("status") in ("won","lost"):
+                        break
+                    log.info(f"[{market}] Contract #{contract_id} still open, waiting 5s...")
+                    time.sleep(5)
+
+                if outcome and outcome.get("status") in ("won","lost"):
                     _handle_outcome(market, direction, stake,
                                     outcome, risk_manager, trade, signal)
+                else:
+                    log.warning(f"[{market}] Could not get result for #{contract_id} after retries")
+                    # Save as open so it still appears in history
+                    _save_trade({
+                        "contract_id": contract_id,
+                        "symbol":      market,
+                        "direction":   direction,
+                        "stake":       round(stake, 2),
+                        "payout":      round(float(trade.get("payout", 0)), 2),
+                        "result":      "open",
+                        "profit":      0,
+                        "expiry":      expiry,
+                        "confidence":  signal.get("confidence","normal"),
+                    })
 
             except Exception as e:
                 log.error(f"[{market}] Error: {e}", exc_info=True)
@@ -325,6 +348,7 @@ def _handle_outcome(market, direction, stake, outcome,
         log.info(f"[{market}] ✅ WON +${profit:.2f} | "
                  f"Balance: ${risk.current_balance + profit:.2f}")
         risk.record_win(profit)
+        if staking_engine: staking_engine.record_win(profit)
         send_alert(f"✅ {market} {direction} WON +${profit:.2f}\n"
                    f"Balance: ${risk.current_balance:.2f}")
 
@@ -332,6 +356,7 @@ def _handle_outcome(market, direction, stake, outcome,
         log.info(f"[{market}] ❌ LOST -${stake:.2f} | "
                  f"Balance: ${risk.current_balance - stake:.2f}")
         risk.record_loss(stake)
+        if staking_engine: staking_engine.record_loss(stake)
         send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
                    f"Balance: ${risk.current_balance:.2f}")
 
