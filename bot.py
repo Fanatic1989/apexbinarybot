@@ -157,7 +157,10 @@ def _run_session(name: str, max_trades: int, max_hours: int):
         # ── Pause check ──────────────────
         if risk_manager.is_paused():
             remaining = risk_manager.pause_remaining()
-            log.info(f"[BOT] ⏸ Paused — resuming in {remaining:.0f}s")
+            # Only log every 5 minutes to reduce spam
+            if int(remaining) % 300 < 31:
+                log.info(f"[BOT] ⏸ Paused — resuming in {remaining:.0f}s "
+                         f"({remaining/60:.1f} min)")
             time.sleep(min(remaining, 30))
             continue
 
@@ -273,13 +276,20 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                 _wait_for_settlement(expiry, market)
 
                 # ── Get result with retry ──
-                outcome   = None
-                saved_stake = trade.get("stake", stake)   # use actual stake placed
+                outcome      = None
+                saved_stake  = trade.get("stake", stake)
                 saved_payout = trade.get("payout", 0)
 
-                # For forex (15min+) poll every 15s for up to 5 minutes after expiry
-                max_polls   = 20 if market.startswith("frx") else 10
-                poll_sleep  = 15 if market.startswith("frx") else 8
+                # Poll settings per market type
+                if market.startswith("frx"):
+                    max_polls  = 20
+                    poll_sleep = 15
+                elif "HZ" in market:
+                    max_polls  = 15
+                    poll_sleep = 5
+                else:
+                    max_polls  = 12
+                    poll_sleep = 8
 
                 for _attempt in range(max_polls):
                     try:
@@ -458,6 +468,17 @@ def _save_trade(trade: dict):
         for k, v in empty.items():
             if k not in data:
                 data[k] = v
+
+        # Check for duplicate contract_id — update instead of append
+        cid = str(trade.get("contract_id", ""))
+        if cid and cid != "—":
+            for existing in data["trades"]:
+                if str(existing.get("contract_id","")) == cid:
+                    log.info(f"[HISTORY] Duplicate #{cid} — updating existing record")
+                    existing.update(trade)
+                    with open(history_file, "w") as f:
+                        json.dump(data, f, indent=2)
+                    return   # Don't double-count
 
         data["trades"].append(trade)
         data["total_trades"] = data.get("total_trades", 0) + 1
