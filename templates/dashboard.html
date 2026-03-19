@@ -422,6 +422,24 @@ function tickTimers(){
 }
 setInterval(tickTimers,100);
 
+// Force reload trades if any row has been "Settling..." for over 2 minutes
+setInterval(function(){
+  document.querySelectorAll('#trade-tbody tr').forEach(row=>{
+    const tc = row.querySelector('td:nth-child(6)');
+    if(tc && tc.textContent.includes('Settling')){
+      const timeCell = row.querySelector('td:first-child');
+      if(timeCell){
+        const t = new Date(timeCell.textContent.replace(' UTC','Z'));
+        const expTd = row.querySelector('td:nth-child(5)');
+        const expM  = parseFloat(expTd ? expTd.textContent : 1);
+        const settleAt = new Date(t.getTime() + expM*60000);
+        const stuck = Date.now() - settleAt > 120000; // 2 min after expected settle
+        if(stuck){ loadTrades(); }
+      }
+    }
+  });
+}, 15000);
+
 // ── Helpers ──────────────────────────────────
 function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
 function setPill(id,txt,cls){
