@@ -257,31 +257,51 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                 _wait_for_settlement(expiry, market)
 
                 # ── Get result with retry ──
-                outcome = None
-                for _attempt in range(10):
-                    outcome = get_contract_result(contract_id)
-                    if outcome and outcome.get("status") in ("won","lost"):
-                        break
-                    log.info(f"[{market}] Contract #{contract_id} still open, "
-                             f"retry {_attempt+1}/10 in 8s...")
-                    time.sleep(8)
+                outcome   = None
+                saved_stake = trade.get("stake", stake)   # use actual stake placed
+                saved_payout = trade.get("payout", 0)
 
-                if outcome and outcome.get("status") in ("won","lost"):
-                    _handle_outcome(market, direction, stake,
-                                    outcome, risk_manager, trade, signal)
+                # For forex (15min+) poll every 15s for up to 5 minutes after expiry
+                max_polls   = 20 if market.startswith("frx") else 10
+                poll_sleep  = 15 if market.startswith("frx") else 8
+
+                for _attempt in range(max_polls):
+                    try:
+                        outcome = get_contract_result(contract_id)
+                    except Exception as _poll_err:
+                        log.warning(f"[{market}] Poll error attempt "
+                                    f"{_attempt+1}: {_poll_err}")
+                        outcome = None
+
+                    if outcome and outcome.get("status") in ("won", "lost"):
+                        log.info(f"[{market}] Contract #{contract_id} settled: "
+                                 f"{outcome['status'].upper()} on attempt {_attempt+1}")
+                        break
+
+                    log.info(f"[{market}] #{contract_id} still open — "
+                             f"poll {_attempt+1}/{max_polls} in {poll_sleep}s...")
+                    time.sleep(poll_sleep)
+
+                if outcome and outcome.get("status") in ("won", "lost"):
+                    _handle_outcome(market, direction, saved_stake,
+                                    outcome, risk_manager,
+                                    {**trade, "stake": saved_stake,
+                                     "payout": saved_payout},
+                                    signal)
                 else:
-                    log.warning(f"[{market}] Could not get result for #{contract_id} after retries")
-                    # Save as open so it still appears in history
+                    log.error(f"[{market}] Contract #{contract_id} — "
+                              f"no result after {max_polls} polls. "
+                              f"Saving as unresolved.")
                     _save_trade({
                         "contract_id": contract_id,
                         "symbol":      market,
                         "direction":   direction,
-                        "stake":       round(stake, 2),
-                        "payout":      round(float(trade.get("payout", 0)), 2),
-                        "result":      "open",
+                        "stake":       round(float(saved_stake), 2),
+                        "payout":      round(float(saved_payout), 2),
+                        "result":      "unresolved",
                         "profit":      0,
                         "expiry":      expiry,
-                        "confidence":  signal.get("confidence","normal"),
+                        "confidence":  signal.get("confidence", "normal"),
                     })
 
             except Exception as e:
@@ -381,41 +401,75 @@ def _handle_outcome(market, direction, stake, outcome,
 # Save trade to history
 # ─────────────────────────────────────────
 def _save_trade(trade: dict):
+    """Save trade to history file. Always writes, never silently fails."""
     history_file = "trade_history.json"
     empty = {"trades": [], "total_trades": 0,
              "total_wins": 0, "total_losses": 0, "net_pnl": 0.0}
+
+    # Ensure all required fields exist
+    trade.setdefault("time",        datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
+    trade.setdefault("symbol",      "unknown")
+    trade.setdefault("direction",   "unknown")
+    trade.setdefault("stake",       0)
+    trade.setdefault("payout",      0)
+    trade.setdefault("result",      "unknown")
+    trade.setdefault("profit",      0)
+    trade.setdefault("expiry",      0)
+    trade.setdefault("confidence",  "normal")
+
+    # Convert all numeric fields safely
+    trade["stake"]  = round(float(trade["stake"]),  2)
+    trade["payout"] = round(float(trade["payout"]), 2)
+    trade["profit"] = round(float(trade["profit"]), 2)
+
+    log.info(f"[HISTORY] Saving: {trade['symbol']} {trade['direction']} "
+             f"{trade['result'].upper()} stake=${trade['stake']} "
+             f"profit=${trade['profit']}")
+
     try:
-        if os.path.exists(history_file):
+        # Load existing data
+        try:
             with open(history_file, "r") as f:
                 data = json.load(f)
-        else:
-            data = empty
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = empty.copy()
 
+        # Ensure all keys exist
         for k, v in empty.items():
             if k not in data:
                 data[k] = v
 
-        trade["time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         data["trades"].append(trade)
-        data["total_trades"] += 1
+        data["total_trades"] = data.get("total_trades", 0) + 1
 
-        if trade.get("result") == "won":
-            data["total_wins"] += 1
-            data["net_pnl"]     = round(data["net_pnl"] + abs(float(trade.get("profit", 0))), 2)
-        else:
-            data["total_losses"] += 1
-            data["net_pnl"]      = round(data["net_pnl"] - float(trade.get("stake", 0)), 2)
+        result = trade.get("result", "")
+        if result == "won":
+            data["total_wins"] = data.get("total_wins", 0) + 1
+            data["net_pnl"]    = round(data.get("net_pnl", 0) + abs(trade["profit"]), 2)
+        elif result in ("lost", "unresolved"):
+            data["total_losses"] = data.get("total_losses", 0) + 1
+            data["net_pnl"]      = round(data.get("net_pnl", 0) - trade["stake"], 2)
 
+        # Cap at 500 records
         if len(data["trades"]) > 500:
             data["trades"] = data["trades"][-500:]
 
         with open(history_file, "w") as f:
             json.dump(data, f, indent=2)
 
-        log.info(f"[HISTORY] {trade['symbol']} {trade['direction']} "
-                 f"{trade['result'].upper()} saved.")
+        log.info(f"[HISTORY] ✓ Saved. Total: {data['total_trades']} trades | "
+                 f"W:{data['total_wins']} L:{data['total_losses']} "
+                 f"P&L:${data['net_pnl']}")
+
     except Exception as e:
-        log.error(f"[HISTORY] Failed to save: {e}")
+        log.error(f"[HISTORY] ✗ FAILED to save trade: {e}", exc_info=True)
+        # Emergency fallback — append to a simple log file
+        try:
+            with open("trade_emergency.log", "a") as ef:
+                ef.write(json.dumps(trade) + "\n")
+            log.info("[HISTORY] Emergency save to trade_emergency.log")
+        except Exception as e2:
+            log.error(f"[HISTORY] Emergency save also failed: {e2}")
 
 
 # ─────────────────────────────────────────
