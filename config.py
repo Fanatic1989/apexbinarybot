@@ -33,11 +33,19 @@ HTF_COUNT          = 50
 # Markets
 # ─────────────────────────────────────────
 SYNTHETIC_MARKETS = [
-    "R_50", "R_75", "R_100",
-    "1HZ50V", "1HZ75V", "1HZ100V",
-    "JD50", "JD75", "JD100",
-    # BOOM/CRASH removed — don't support Rise/Fall binary contracts
-    # Use Deriv's dedicated Boom/Crash product instead
+    # Tier 1 — proven performers, keep always
+    "R_50",
+    "R_100",
+    "1HZ50V",
+    "JD50",
+    "JD75",
+    # Tier 2 — moderate, monitor
+    "R_75",
+    "JD100",
+    # Tier 3 — underperforming, removed for now
+    # "1HZ100V",   # 0% win rate in analysis
+    # "1HZ75V",    # insufficient data
+    # BOOM/CRASH removed — don't support Rise/Fall binary
 ]
 
 FOREX_MARKETS = [
