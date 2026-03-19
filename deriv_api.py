@@ -183,25 +183,67 @@ def place_trade(symbol, direction, stake, duration_minutes):
             except: pass
 
 def get_contract_result(contract_id):
+    """
+    Fetch contract result. Returns dict with status won/lost/open.
+    Also tries profit_table as fallback for settled contracts.
+    """
     ws = None
     try:
         ws = _open_ws()
+
+        # Primary: proposal_open_contract
         ws.send(json.dumps({
             "proposal_open_contract": 1,
             "contract_id": contract_id
         }))
         result = json.loads(ws.recv())
-        if "error" in result:
-            log.error(f"[DERIV] Contract result error: {result['error']['message']}")
-            return {}
-        contract = result.get("proposal_open_contract", {})
-        return {
-            "status":      contract.get("status", "open"),
-            "profit":      float(contract.get("profit", 0)),
-            "entry_spot":  contract.get("entry_spot"),
-            "exit_spot":   contract.get("exit_spot"),
-            "contract_id": contract_id
-        }
+
+        if "error" not in result:
+            contract = result.get("proposal_open_contract", {})
+            status   = contract.get("status", "open")
+            profit   = float(contract.get("profit", 0))
+
+            if status in ("won", "lost"):
+                log.info(f"[DERIV] Contract #{contract_id} → "
+                         f"{status.upper()} profit=${profit:.2f}")
+                return {
+                    "status":      status,
+                    "profit":      profit,
+                    "entry_spot":  contract.get("entry_spot"),
+                    "exit_spot":   contract.get("exit_spot"),
+                    "contract_id": contract_id
+                }
+
+        # Fallback: profit_table for already-settled contracts
+        ws.send(json.dumps({
+            "profit_table": 1,
+            "description":  1,
+            "sort":         "DESC",
+            "limit":        10
+        }))
+        pt = json.loads(ws.recv())
+
+        if "profit_table" in pt:
+            for txn in pt["profit_table"].get("transactions", []):
+                if str(txn.get("contract_id")) == str(contract_id):
+                    sell_price = float(txn.get("sell_price", 0))
+                    buy_price  = float(txn.get("buy_price",  0))
+                    profit     = round(sell_price - buy_price, 2)
+                    status     = "won" if sell_price > buy_price else "lost"
+                    log.info(f"[DERIV] Contract #{contract_id} found in profit_table → "
+                             f"{status.upper()} profit=${profit:.2f}")
+                    return {
+                        "status":      status,
+                        "profit":      profit,
+                        "entry_spot":  txn.get("purchase_time"),
+                        "exit_spot":   txn.get("sell_time"),
+                        "contract_id": contract_id
+                    }
+
+        # Still open or not found
+        log.debug(f"[DERIV] Contract #{contract_id} still open or not in profit_table")
+        return {"status": "open", "profit": 0, "contract_id": contract_id}
+
     except Exception as e:
         log.error(f"[DERIV] get_contract_result exception: {e}")
         return {}
