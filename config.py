@@ -114,20 +114,28 @@ MARKETS = list(dict.fromkeys(FOREX_MARKETS + SYNTHETIC_MARKETS))
 # ─────────────────────────────────────────
 # Expiry map (minutes)
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# Expiry settings
+# Deriv forex binary: duration_unit = "m" (minutes)
+# Valid forex durations: 15m, 30m, 60m or use "t" (ticks)
+# Valid synthetic durations: 1m, 2m, 3m, 5m
+# ─────────────────────────────────────────
 EXPIRY_MAP = {
-    # Forex
-    "frxEURUSD": 5, "frxGBPUSD": 5, "frxUSDJPY": 3,
-    "frxGBPJPY": 5, "frxEURGBP": 5, "frxAUDUSD": 5,
-    # Synthetics
-    "R_50": 3,  "R_75": 3,   "R_100": 2,
-    "1HZ50V": 1,"1HZ75V": 1, "1HZ100V": 1,
-    "JD50": 1,  "JD75": 1,   "JD100": 1,
+    # Forex — minimum is 15 minutes for most pairs
+    "frxEURUSD": 15, "frxGBPUSD": 15, "frxUSDJPY": 15,
+    "frxAUDUSD": 15, "frxUSDCAD": 15, "frxUSDCHF": 15,
+    "frxEURGBP": 15, "frxEURJPY": 15, "frxGBPJPY": 15,
+    # Synthetics — short expiry works fine
+    "R_50": 3,   "R_75": 3,   "R_100": 2,
+    "1HZ50V": 1, "1HZ75V": 1, "1HZ100V": 1,
+    "JD50": 1,   "JD75": 1,   "JD100": 1,
     "BOOM500": 1,  "BOOM1000": 1,
     "CRASH500": 1, "CRASH1000": 1,
 }
 
 def get_expiry(market: str) -> int:
-    return EXPIRY_MAP.get(market, 3)
+    """Return expiry in minutes for a given market."""
+    return EXPIRY_MAP.get(market, 15 if is_forex(market) else 3)
 
 def is_forex(market: str) -> bool:
     return market.startswith("frx")
