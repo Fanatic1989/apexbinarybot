@@ -4,7 +4,7 @@ services:
     runtime: python
     pythonVersion: "3.11.9"
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120 --keep-alive 5
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
@@ -42,5 +42,9 @@ services:
         value: "false"
       - key: COMPOUND_PERCENT
         value: "50"
+      - key: STAKING_STRATEGY
+        value: "flat"
       - key: LOG_LEVEL
-        value: INFO
+        value: "INFO"
+      - key: SIGNAL_ONLY
+        value: "false"
