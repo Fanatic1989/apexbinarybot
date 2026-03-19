@@ -249,9 +249,25 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                     continue
 
                 session_trades += 1
-                contract_id = trade["contract_id"]
+                contract_id  = trade["contract_id"]
+                actual_stake = trade.get("stake", stake)
+                actual_payout= trade.get("payout", 0)
+
                 log.info(f"[{market}] Trade #{session_trades} placed — "
                          f"contract #{contract_id}")
+
+                # Save immediately as OPEN so timer shows on dashboard
+                _save_trade({
+                    "contract_id": contract_id,
+                    "symbol":      market,
+                    "direction":   direction,
+                    "stake":       round(float(actual_stake), 2),
+                    "payout":      round(float(actual_payout), 2),
+                    "result":      "open",
+                    "profit":      0,
+                    "expiry":      expiry,
+                    "confidence":  signal.get("confidence", "normal"),
+                })
 
                 # ── Wait for settlement ───
                 _wait_for_settlement(expiry, market)
@@ -283,11 +299,12 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                     time.sleep(poll_sleep)
 
                 if outcome and outcome.get("status") in ("won", "lost"):
-                    _handle_outcome(market, direction, saved_stake,
+                    _handle_outcome(market, direction, actual_stake,
                                     outcome, risk_manager,
-                                    {**trade, "stake": saved_stake,
-                                     "payout": saved_payout},
-                                    signal)
+                                    {**trade, "stake": actual_stake,
+                                     "payout": actual_payout},
+                                    signal,
+                                    update_contract_id=contract_id)
                 else:
                     log.error(f"[{market}] Contract #{contract_id} — "
                               f"no result after {max_polls} polls. "
@@ -350,7 +367,8 @@ def _calculate_stake() -> float:
 def _handle_outcome(market, direction, stake, outcome,
                     risk: RiskManager,
                     trade: dict = None,
-                    signal: dict = None):
+                    signal: dict = None,
+                    update_contract_id: str = None):
     status      = outcome.get("status", "unknown")
     profit      = float(outcome.get("profit", 0))
     confidence  = signal.get("confidence", "normal") if signal else "normal"
@@ -472,6 +490,46 @@ def _save_trade(trade: dict):
             log.info("[HISTORY] Emergency save to trade_emergency.log")
         except Exception as e2:
             log.error(f"[HISTORY] Emergency save also failed: {e2}")
+
+
+# ─────────────────────────────────────────
+# Update existing trade result in history
+# ─────────────────────────────────────────
+def _update_trade(contract_id, updates: dict):
+    """Update an existing trade record by contract_id."""
+    history_file = "trade_history.json"
+    try:
+        with open(history_file, "r") as f:
+            data = json.load(f)
+
+        updated = False
+        for trade in data["trades"]:
+            if str(trade.get("contract_id","")) == str(contract_id):
+                trade.update(updates)
+                updated = True
+                break
+
+        if updated:
+            # Update summary counters
+            result = updates.get("result","")
+            profit = float(updates.get("profit", 0))
+            if result == "won":
+                data["total_wins"]   = data.get("total_wins", 0) + 1
+                data["net_pnl"]      = round(data.get("net_pnl", 0) + abs(profit), 2)
+            elif result == "lost":
+                data["total_losses"] = data.get("total_losses", 0) + 1
+                data["net_pnl"]      = round(data.get("net_pnl", 0) + profit, 2)  # profit is negative
+
+            with open(history_file, "w") as f:
+                json.dump(data, f, indent=2)
+            log.info(f"[HISTORY] Updated #{contract_id} → {result.upper()} "
+                     f"profit=${profit:.2f}")
+        else:
+            log.warning(f"[HISTORY] Contract #{contract_id} not found for update — saving fresh")
+            _save_trade({"contract_id": contract_id, **updates})
+
+    except Exception as e:
+        log.error(f"[HISTORY] Update failed for #{contract_id}: {e}")
 
 
 # ─────────────────────────────────────────
