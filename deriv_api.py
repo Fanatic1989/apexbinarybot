@@ -92,9 +92,9 @@ def place_trade(symbol, direction, stake, duration_minutes):
         # Forex: try minutes
         durations_to_try = [(d, "m") for d in [15, 30, 60, 120]]
     elif any(symbol.startswith(p) for p in ("BOOM","CRASH")):
-        # Boom/Crash: ticks-based contracts work best
-        # Try ticks first, then minutes as fallback
-        durations_to_try = [(5,"t"),(10,"t"),(1,"m"),(2,"m"),(3,"m"),(5,"m")]
+        # Boom/Crash on Deriv use specific minute durations only
+        # Rise/Fall contracts: try 1m through 10m
+        durations_to_try = [(1,"m"),(2,"m"),(3,"m"),(5,"m"),(10,"m")]
     elif any(symbol.startswith(p) for p in ("JD",)):
         # Jump indices
         durations_to_try = [(1,"m"),(2,"m"),(3,"m")]
