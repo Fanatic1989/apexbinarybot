@@ -1,330 +1,357 @@
 """
-AI Strategy Selector — uses Claude API to analyse market conditions
-and select the optimal strategy mode for each market in real time.
+Multi-strategy engine with AI selection.
 
-Tracks per-strategy, per-market performance and feeds that data
-to Claude which recommends which strategy to prioritise.
+The AI selector analyses current market conditions
+and picks the best strategy mode for each market.
+Performance is tracked per strategy per market
+and fed back to Claude for continuous improvement.
 """
-import json
-import time
 import logging
-import os
-import requests
-from datetime import datetime
+import pandas as pd
+import numpy as np
+import time
+
+import config
+from sniper_filter import sniper_confirm
+from strategy_ai import tracker, selector
 
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────
-# Strategy performance tracker
+# HTF cache
 # ─────────────────────────────────────────
-class StrategyTracker:
-    """
-    Tracks win/loss per strategy mode per market.
-    Persists to disk so data survives restarts.
-    """
-    FILE = "strategy_performance.json"
+_htf_cache = {}
+_HTF_TTL   = 1800
 
-    STRATEGIES = [
-        "rsi_reversal",      # Mode 1 — highest potential
-        "bb_bounce",         # Mode 2
-        "ema_triple",        # Mode 3
-        "false_breakout",    # Mode 4
-        "momentum_streak",   # Mode 5
-    ]
+def _get_htf_trend(market):
+    now = time.time()
+    if market in _htf_cache:
+        candles, ts = _htf_cache[market]
+        if now - ts < _HTF_TTL:
+            return _compute_trend(candles)
+    try:
+        from deriv_api import get_htf_candles
+        candles = get_htf_candles(market, retries=1)
+    except Exception as e:
+        log.debug(f"[STRATEGY] HTF failed {market}: {e}")
+        return 0
+    if candles and len(candles) >= 25:
+        _htf_cache[market] = (candles, now)
+        return _compute_trend(candles)
+    _htf_cache[market] = ([], now - _HTF_TTL + 300)
+    return 0
 
-    def __init__(self):
-        self.data = self._load()
-        self.session_start = datetime.utcnow().isoformat()
-
-    def _load(self) -> dict:
-        try:
-            with open(self.FILE) as f:
-                return json.load(f)
-        except:
-            return self._empty()
-
-    def _empty(self) -> dict:
-        return {
-            "strategies": {s: {"wins": 0, "losses": 0, "last_used": None}
-                          for s in self.STRATEGIES},
-            "markets": {},
-            "ai_recommendations": [],
-            "last_updated": None
-        }
-
-    def _save(self):
-        try:
-            self.data["last_updated"] = datetime.utcnow().isoformat()
-            with open(self.FILE, "w") as f:
-                json.dump(self.data, f, indent=2)
-        except Exception as e:
-            log.error(f"[TRACKER] Save failed: {e}")
-
-    def record(self, strategy: str, market: str, result: str):
-        """Record a trade outcome for a strategy+market combo."""
-        # Global strategy stats
-        s = self.data["strategies"].setdefault(strategy, {"wins":0,"losses":0,"last_used":None})
-        if result == "won":
-            s["wins"] += 1
-        else:
-            s["losses"] += 1
-        s["last_used"] = datetime.utcnow().isoformat()
-
-        # Per-market stats
-        m = self.data["markets"].setdefault(market, {})
-        ms = m.setdefault(strategy, {"wins":0,"losses":0})
-        if result == "won":
-            ms["wins"] += 1
-        else:
-            ms["losses"] += 1
-
-        self._save()
-        log.info(f"[TRACKER] {strategy} on {market}: {result.upper()} "
-                 f"| Global: {s['wins']}W {s['losses']}L")
-
-    def get_win_rates(self) -> dict:
-        """Return win rate for each strategy."""
-        rates = {}
-        for name, stats in self.data["strategies"].items():
-            total = stats["wins"] + stats["losses"]
-            rates[name] = {
-                "win_rate": round(stats["wins"]/total*100, 1) if total > 0 else None,
-                "total":    total,
-                "wins":     stats["wins"],
-                "losses":   stats["losses"],
-            }
-        return rates
-
-    def get_market_best_strategy(self, market: str) -> str:
-        """Return the best performing strategy for a specific market."""
-        m = self.data["markets"].get(market, {})
-        best_wr   = -1
-        best_strat = None
-        for strat, stats in m.items():
-            total = stats["wins"] + stats["losses"]
-            if total < 3:
-                continue   # need minimum 3 trades to judge
-            wr = stats["wins"] / total
-            if wr > best_wr:
-                best_wr   = wr
-                best_strat = strat
-        return best_strat
-
-    def get_summary(self) -> dict:
-        return {
-            "win_rates":  self.get_win_rates(),
-            "markets":    self.data["markets"],
-            "last_updated": self.data.get("last_updated"),
-        }
+def _compute_trend(candles):
+    try:
+        df  = _to_df(candles)
+        e9  = _ema(df["close"], 9).iloc[-1]
+        e21 = _ema(df["close"], 21).iloc[-1]
+        return 1 if e9 > e21 * 1.0001 else -1 if e9 < e21 * 0.9999 else 0
+    except:
+        return 0
 
 
 # ─────────────────────────────────────────
-# AI Strategy Selector
+# Indicators
 # ─────────────────────────────────────────
-class AIStrategySelector:
+def _ema(s, p):    return s.ewm(span=p, adjust=False).mean()
+def _rsi(s, p=14):
+    d = s.diff()
+    g = d.clip(lower=0).ewm(span=p, adjust=False).mean()
+    l = (-d.clip(upper=0)).ewm(span=p, adjust=False).mean()
+    return 100 - (100 / (1 + g / l.replace(0, np.nan)))
+def _bollinger(df, p=20, std=2):
+    m = df["close"].rolling(p).mean()
+    s = df["close"].rolling(p).std()
+    df["bb_upper"] = m + s*std
+    df["bb_lower"] = m - s*std
+    df["bb_mid"]   = m
+    df["bb_width"] = df["bb_upper"] - df["bb_lower"]
+    df["bb_pct"]   = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
+    return df
+def _atr(df, p=14):
+    h,l,c = df["high"],df["low"],df["close"]
+    tr = pd.concat([h-l,(h-c.shift()).abs(),(l-c.shift()).abs()],axis=1).max(axis=1)
+    return tr.ewm(span=p, adjust=False).mean()
+def _to_df(candles):
+    df = pd.DataFrame(candles)
+    for c in ["open","high","low","close"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df.dropna(subset=["open","high","low","close"], inplace=True)
+    return df.reset_index(drop=True)
+
+
+# ─────────────────────────────────────────
+# Main entry point
+# ─────────────────────────────────────────
+def analyze_market(candles: list, market: str) -> dict:
     """
-    Uses Claude API to analyse market candle data
-    and recommend which strategy to use.
-
-    Falls back to rule-based selection if API unavailable.
+    AI-powered multi-strategy analysis.
+    1. AI selector picks the best strategy for current conditions
+    2. That strategy runs and generates a signal
+    3. Sniper filter confirms or rejects
+    4. Result is tracked back to improve future AI selections
     """
-
-    CACHE_TTL = 300  # Re-ask Claude every 5 minutes per market
-
-    def __init__(self, tracker: StrategyTracker):
-        self.tracker    = tracker
-        self._cache     = {}   # {market: (strategy, timestamp)}
-        self._ai_active = True
-
-    def select_strategy(self, candles: list, market: str) -> str:
-        """
-        Select the best strategy for current market conditions.
-        Returns one of: rsi_reversal, bb_bounce, ema_triple,
-                        false_breakout, momentum_streak
-        """
-        # Check cache first
-        if market in self._cache:
-            strat, ts = self._cache[market]
-            if time.time() - ts < self.CACHE_TTL:
-                return strat
-
-        # Check if this market has a proven best strategy (data-driven)
-        market_best = self.tracker.get_market_best_strategy(market)
-        if market_best:
-            log.info(f"[AI] {market} → using proven best: {market_best}")
-            self._cache[market] = (market_best, time.time())
-            return market_best
-
-        # Use Claude AI to analyse current conditions
-        if self._ai_active:
-            ai_choice = self._ask_claude(candles, market)
-            if ai_choice:
-                self._cache[market] = (ai_choice, time.time())
-                log.info(f"[AI] Claude selected: {ai_choice} for {market}")
-                return ai_choice
-
-        # Fallback: rule-based selection
-        return self._rule_based(candles, market)
-
-    def _ask_claude(self, candles: list, market: str) -> str:
-        """Ask Claude which strategy to use based on market conditions."""
-        try:
-            # Prepare compact candle summary for Claude
-            last20 = candles[-20:]
-            closes = [round(c["close"], 4) for c in last20]
-            highs  = [round(c["high"],  4) for c in last20]
-            lows   = [round(c["low"],   4) for c in last20]
-
-            # Calculate quick indicators to give Claude context
-            import numpy as np
-            arr = np.array(closes)
-            rsi = _quick_rsi(arr)
-            trend = "UP" if arr[-1] > arr[-5] else "DOWN" if arr[-1] < arr[-5] else "FLAT"
-            vol   = round(float(np.std(arr[-10:]) / np.mean(arr[-10:]) * 100), 3)
-            bb_pos = _quick_bb_position(arr)
-
-            # Performance data
-            rates = self.tracker.get_win_rates()
-            perf_summary = ", ".join([
-                f"{s}: {v['win_rate']}% ({v['total']} trades)"
-                for s, v in rates.items()
-                if v['total'] > 0
-            ]) or "No data yet"
-
-            prompt = f"""You are a binary options trading strategy selector for Deriv synthetic indices.
-
-Market: {market}
-Current RSI: {rsi:.1f}
-Trend (5-candle): {trend}
-Volatility: {vol}%
-BB Position (0=lower, 1=upper): {bb_pos:.2f}
-Last 5 closes: {closes[-5:]}
-
-Strategy performance so far:
-{perf_summary}
-
-Available strategies:
-1. rsi_reversal — trades when RSI was extreme (>76 or <24) and is now turning back. Best in ranging/choppy markets.
-2. bb_bounce — trades when price pierces Bollinger Band then closes back inside. Best when volatility is moderate.
-3. ema_triple — trades when EMA 9/21/50 all aligned. Best in strong trending markets.
-4. false_breakout — trades when price breaks a recent high/low then reverses. Best in ranging markets.
-5. momentum_streak — trades 3 consecutive same-direction candles. Best in trending markets with momentum.
-
-Based on current conditions, which single strategy is MOST LIKELY to win the next trade?
-
-Reply with ONLY the strategy name, nothing else. Choose from:
-rsi_reversal, bb_bounce, ema_triple, false_breakout, momentum_streak"""
-
-            response = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "model":      "claude-sonnet-4-20250514",
-                    "max_tokens": 50,
-                    "messages":   [{"role": "user", "content": prompt}]
-                },
-                timeout=8
-            )
-
-            if response.status_code == 200:
-                data   = response.json()
-                choice = data["content"][0]["text"].strip().lower().replace(" ","_")
-                valid  = ["rsi_reversal","bb_bounce","ema_triple","false_breakout","momentum_streak"]
-                if choice in valid:
-                    # Store recommendation
-                    self.tracker.data["ai_recommendations"].append({
-                        "market": market,
-                        "strategy": choice,
-                        "rsi": rsi,
-                        "trend": trend,
-                        "time": datetime.utcnow().isoformat()
-                    })
-                    if len(self.tracker.data["ai_recommendations"]) > 100:
-                        self.tracker.data["ai_recommendations"] = \
-                            self.tracker.data["ai_recommendations"][-100:]
-                    self.tracker._save()
-                    return choice
-            else:
-                log.warning(f"[AI] Claude API returned {response.status_code}")
-                self._ai_active = False  # disable if API fails
-
-        except Exception as e:
-            log.warning(f"[AI] Claude API error: {e}")
-            self._ai_active = False
-
+    if not candles or len(candles) < 40:
         return None
 
-    def _rule_based(self, candles: list, market: str) -> str:
-        """
-        Fallback rule-based strategy selection.
-        Uses market conditions to pick the most appropriate strategy.
-        """
-        import numpy as np
-        arr     = np.array([c["close"] for c in candles[-20:]])
-        rsi     = _quick_rsi(arr)
-        bb_pos  = _quick_bb_position(arr)
-        vol     = float(np.std(arr[-10:]) / np.mean(arr[-10:]) * 100)
-        trending = abs(arr[-1] - arr[-10]) > np.std(arr[-10:]) * 1.5
+    try:
+        df = _to_df(candles)
+    except Exception as e:
+        log.error(f"[STRATEGY] {market} error: {e}")
+        return None
 
-        # High RSI or low RSI → RSI reversal
-        if rsi >= 72 or rsi <= 28:
-            return "rsi_reversal"
+    if len(df) < 40:
+        return None
 
-        # Price near BB extremes → BB bounce
-        if bb_pos > 0.85 or bb_pos < 0.15:
-            return "bb_bounce"
+    # ── AI selects strategy ───────────────
+    chosen_strategy = selector.select_strategy(candles, market)
+    log.info(f"[AI] {market} → {chosen_strategy}")
 
-        # Strong trend → EMA triple
-        if trending and 0.3 <= bb_pos <= 0.7:
-            return "ema_triple"
+    # ── Run chosen strategy ───────────────
+    signal = _run_strategy(chosen_strategy, df, candles, market)
 
-        # Low volatility → false breakout more common
-        if vol < 0.05:
-            return "false_breakout"
+    if signal and signal.get("direction") != "NONE":
+        # Tag signal with which strategy generated it
+        signal["strategy"] = chosen_strategy
+        return signal
 
-        # Default: momentum
-        return "momentum_streak"
+    # If chosen strategy found nothing, try one fallback
+    fallback = _get_fallback(chosen_strategy)
+    if fallback:
+        signal = _run_strategy(fallback, df, candles, market)
+        if signal and signal.get("direction") != "NONE":
+            signal["strategy"] = fallback
+            log.info(f"[AI] {market} fallback {fallback} found signal")
+            return signal
 
-    def re_enable_ai(self):
-        """Re-enable AI after a failure."""
-        self._ai_active = True
-        log.info("[AI] AI strategy selector re-enabled")
+    return _no_signal(market)
 
 
-# ─────────────────────────────────────────
-# Quick indicator helpers
-# ─────────────────────────────────────────
-def _quick_rsi(arr, period=14) -> float:
-    import numpy as np
-    if len(arr) < period + 1:
-        return 50.0
-    deltas = np.diff(arr)
-    gains  = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    ag = np.mean(gains[-period:])
-    al = np.mean(losses[-period:])
-    if al == 0:
-        return 100.0
-    rs = ag / al
-    return float(100 - 100 / (1 + rs))
-
-def _quick_bb_position(arr, period=20) -> float:
-    import numpy as np
-    if len(arr) < period:
-        return 0.5
-    window = arr[-period:]
-    mean   = np.mean(window)
-    std    = np.std(window)
-    if std == 0:
-        return 0.5
-    upper = mean + 2*std
-    lower = mean - 2*std
-    pos   = (arr[-1] - lower) / (upper - lower)
-    return float(np.clip(pos, -0.2, 1.2))
+def _get_fallback(strategy: str) -> str:
+    """Return a complementary fallback strategy."""
+    fallbacks = {
+        "rsi_reversal":   "bb_bounce",
+        "bb_bounce":      "rsi_reversal",
+        "ema_triple":     "momentum_streak",
+        "false_breakout": "rsi_reversal",
+        "momentum_streak":"ema_triple",
+    }
+    return fallbacks.get(strategy)
 
 
 # ─────────────────────────────────────────
-# Global instances (imported by strategy.py)
+# Strategy dispatcher
 # ─────────────────────────────────────────
-tracker  = StrategyTracker()
-selector = AIStrategySelector(tracker)
+def _run_strategy(name: str, df: pd.DataFrame,
+                  candles: list, market: str) -> dict:
+    """Route to the correct strategy function."""
+    fns = {
+        "rsi_reversal":   _rsi_reversal,
+        "bb_bounce":      _bb_bounce,
+        "ema_triple":     _ema_triple,
+        "false_breakout": _false_breakout,
+        "momentum_streak":_momentum_streak,
+    }
+    fn = fns.get(name)
+    if not fn:
+        return _no_signal(market)
+    try:
+        return fn(df, candles, market)
+    except Exception as e:
+        log.error(f"[STRATEGY] {name} error on {market}: {e}")
+        return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Strategy 1: RSI Extreme Reversal
+# Target win rate: ~68%
+# ─────────────────────────────────────────
+def _rsi_reversal(df, candles, market):
+    df["rsi"]  = _rsi(df["close"])
+    df["ema9"] = _ema(df["close"], 9)
+    df["ema21"]= _ema(df["close"], 21)
+    last, prev = df.iloc[-1], df.iloc[-2]
+
+    rsi_now  = float(last["rsi"])
+    rsi_prev = float(prev["rsi"])
+    bull = float(last["close"]) > float(last["open"])
+    bear = float(last["close"]) < float(last["open"])
+    htf  = _get_htf_trend(market) if config.is_forex(market) else 0
+
+    # RSI was overbought, now turning down — sell signal
+    if rsi_prev >= 76 and rsi_now < rsi_prev - 1.5 and bear:
+        if not (config.is_forex(market) and htf == 1):
+            log.info(f"[S1-RSI] {market} PUT | {rsi_prev:.1f}→{rsi_now:.1f}")
+            return _build(market, "PUT", "high", candles)
+
+    # RSI was oversold, now turning up — buy signal
+    if rsi_prev <= 24 and rsi_now > rsi_prev + 1.5 and bull:
+        if not (config.is_forex(market) and htf == -1):
+            log.info(f"[S1-RSI] {market} CALL | {rsi_prev:.1f}→{rsi_now:.1f}")
+            return _build(market, "CALL", "high", candles)
+
+    return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Strategy 2: Bollinger Band Bounce
+# Target win rate: ~64%
+# ─────────────────────────────────────────
+def _bb_bounce(df, candles, market):
+    df = _bollinger(df)
+    df["rsi"] = _rsi(df["close"])
+    last, prev = df.iloc[-1], df.iloc[-2]
+
+    bb_pct      = float(last["bb_pct"])
+    prev_bb_pct = float(prev["bb_pct"])
+    rsi_val     = float(last["rsi"])
+    bull = float(last["close"]) > float(last["open"])
+    bear = float(last["close"]) < float(last["open"])
+    htf  = _get_htf_trend(market) if config.is_forex(market) else 0
+
+    avg_w = float(df["bb_width"].tail(20).mean())
+    not_wide = float(last["bb_width"]) < avg_w * 1.8
+
+    if prev_bb_pct > 1.0 and bb_pct <= 0.92 and bear and not_wide and 40 <= rsi_val <= 72:
+        if not (config.is_forex(market) and htf == 1):
+            log.info(f"[S2-BB] {market} PUT | bb_pct {bb_pct:.2f}")
+            return _build(market, "PUT", "high", candles)
+
+    if prev_bb_pct < 0.0 and bb_pct >= 0.08 and bull and not_wide and 28 <= rsi_val <= 60:
+        if not (config.is_forex(market) and htf == -1):
+            log.info(f"[S2-BB] {market} CALL | bb_pct {bb_pct:.2f}")
+            return _build(market, "CALL", "high", candles)
+
+    return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Strategy 3: EMA Triple Stack
+# Target win rate: ~62%
+# ─────────────────────────────────────────
+def _ema_triple(df, candles, market):
+    df["ema9"]  = _ema(df["close"], 9)
+    df["ema21"] = _ema(df["close"], 21)
+    df["ema50"] = _ema(df["close"], 50)
+    df["rsi"]   = _rsi(df["close"])
+    last, prev  = df.iloc[-1], df.iloc[-2]
+
+    e9, e21, e50 = float(last["ema9"]), float(last["ema21"]), float(last["ema50"])
+    rsi_val = float(last["rsi"])
+    bull = float(last["close"]) > float(last["open"])
+    bear = float(last["close"]) < float(last["open"])
+    htf  = _get_htf_trend(market) if config.is_forex(market) else 0
+
+    crossed_up   = float(prev["ema9"]) <= float(prev["ema21"]) and e9 > e21
+    crossed_down = float(prev["ema9"]) >= float(prev["ema21"]) and e9 < e21
+
+    if e9 > e21 > e50 and 42 <= rsi_val <= 64 and bull:
+        if not (config.is_forex(market) and htf == -1):
+            conf = "high" if crossed_up else "normal"
+            log.info(f"[S3-EMA] {market} CALL | stack RSI {rsi_val:.1f}")
+            return _build(market, "CALL", conf, candles)
+
+    if e9 < e21 < e50 and 36 <= rsi_val <= 58 and bear:
+        if not (config.is_forex(market) and htf == 1):
+            conf = "high" if crossed_down else "normal"
+            log.info(f"[S3-EMA] {market} PUT | stack RSI {rsi_val:.1f}")
+            return _build(market, "PUT", conf, candles)
+
+    return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Strategy 4: False Breakout Reversal
+# Target win rate: ~61%
+# ─────────────────────────────────────────
+def _false_breakout(df, candles, market):
+    df["rsi"] = _rsi(df["close"])
+    last, prev = df.iloc[-1], df.iloc[-2]
+
+    rsi_val    = float(last["rsi"])
+    close      = float(last["close"])
+    prev_close = float(prev["close"])
+    prev_high  = float(prev["high"])
+    prev_low   = float(prev["low"])
+    bull = close > float(last["open"])
+    bear = close < float(last["open"])
+    htf  = _get_htf_trend(market) if config.is_forex(market) else 0
+
+    recent_high = float(df["high"].tail(10).iloc[:-1].max())
+    recent_low  = float(df["low"].tail(10).iloc[:-1].min())
+
+    if prev_high > recent_high and close < prev_close and bear and 45 <= rsi_val <= 72:
+        if not (config.is_forex(market) and htf == 1):
+            log.info(f"[S4-FB] {market} PUT | false breakout high")
+            return _build(market, "PUT", "high", candles)
+
+    if prev_low < recent_low and close > prev_close and bull and 28 <= rsi_val <= 55:
+        if not (config.is_forex(market) and htf == -1):
+            log.info(f"[S4-FB] {market} CALL | false breakout low")
+            return _build(market, "CALL", "high", candles)
+
+    return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Strategy 5: Momentum Streak
+# Target win rate: ~58%
+# ─────────────────────────────────────────
+def _momentum_streak(df, candles, market):
+    df["ema9"]  = _ema(df["close"], 9)
+    df["ema21"] = _ema(df["close"], 21)
+    df["rsi"]   = _rsi(df["close"])
+    df = _bollinger(df)
+    last = df.iloc[-1]
+
+    rsi_val = float(last["rsi"])
+    bb_pct  = float(last["bb_pct"])
+    e9, e21 = float(last["ema9"]), float(last["ema21"])
+
+    def is_bull(i): return float(df.iloc[i]["close"]) > float(df.iloc[i]["open"])
+    def is_bear(i): return float(df.iloc[i]["close"]) < float(df.iloc[i]["open"])
+
+    if is_bull(-1) and is_bull(-2) and is_bull(-3) and e9>e21 and 48<=rsi_val<=66 and 0.45<=bb_pct<=0.80:
+        log.info(f"[S5-MOM] {market} CALL | 3-streak RSI {rsi_val:.1f}")
+        return _build(market, "CALL", "normal", candles)
+
+    if is_bear(-1) and is_bear(-2) and is_bear(-3) and e9<e21 and 34<=rsi_val<=52 and 0.20<=bb_pct<=0.55:
+        log.info(f"[S5-MOM] {market} PUT | 3-streak RSI {rsi_val:.1f}")
+        return _build(market, "PUT", "normal", candles)
+
+    return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Signal builder + sniper
+# ─────────────────────────────────────────
+def _build(market, direction, base_conf, candles):
+    raw    = {"market": market, "direction": direction, "expiry": config.get_expiry(market)}
+    result = sniper_confirm(candles, raw)
+    score  = result.get("score", 0)
+    if base_conf == "high":
+        result["confirmed"]  = True
+        result["confidence"] = "high" if score >= 2 else "normal"
+    else:
+        result["confirmed"]  = score >= 1
+        result["confidence"] = "high" if score >= 3 else "normal"
+    return result
+
+def _no_signal(market):
+    return {"market": market, "direction": "NONE",
+            "confidence": "low", "confirmed": False,
+            "score": 0, "reasons": [], "expiry": config.get_expiry(market)}
+
+
+# ─────────────────────────────────────────
+# Record outcome back to AI tracker
+# Called from bot.py after trade settles
+# ─────────────────────────────────────────
+def record_trade_outcome(market: str, strategy: str, result: str):
+    """Feed trade result back to AI for learning."""
+    if strategy and result in ("won", "lost"):
+        tracker.record(strategy, market, result)
+        # Re-enable AI if it was disabled
+        if not selector._ai_active:
+            selector.re_enable_ai()
