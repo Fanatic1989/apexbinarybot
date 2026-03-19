@@ -1,248 +1,447 @@
+import time
 import logging
-import pandas as pd
-import numpy as np
+import json
+import os
+from datetime import datetime
 
 import config
-from deriv_api import get_htf_candles
-from sniper_filter import sniper_confirm
+from deriv_api import get_candles, get_balance, place_trade, get_contract_result
+from staking import StakingEngine
+from strategy import analyze_market
+from risk_manager import RiskManager
+from telegram_bot import send_signal, send_alert
 
+# ─────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 log = logging.getLogger(__name__)
 
+# Exposed for server.py /status route
+risk_manager   = None
+last_signals   = []
+staking_engine = None
+
 # ─────────────────────────────────────────
-# HTF cache — refresh every 30 minutes
-# Prevents opening a new WebSocket every scan
+# Schedule constants
 # ─────────────────────────────────────────
-_htf_cache = {}           # {symbol: (candles, timestamp)}
-_HTF_CACHE_TTL = 1800     # 30 minutes in seconds
+# Session 1: 12 hours trading
+# Rest:        1 hour pause
+# Session 2:  11 hours trading
+# Target:     100 trades per 24 hours
+# That means ~4.2 trades per hour = 1 trade every ~14 minutes
+# With 19 markets scanning every 60s we easily hit this
 
-def _get_htf_trend_cached(market):
-    import time as _time
-    now = _time.time()
-    if market in _htf_cache:
-        candles, ts = _htf_cache[market]
-        if now - ts < _HTF_CACHE_TTL:
-            return _compute_htf_trend(candles)
-    # Cache miss or expired — fetch fresh
-    candles = get_htf_candles(market)
-    if candles:
-        _htf_cache[market] = (candles, now)
-        return _compute_htf_trend(candles)
-    return 0
-
-def _compute_htf_trend(candles):
-    try:
-        if not candles or len(candles) < 25:
-            return 0
-        df = _to_df(candles)
-        ema9  = _ema(df["close"], 9).iloc[-1]
-        ema21 = _ema(df["close"], 21).iloc[-1]
-        if ema9 > ema21 * 1.0001:
-            return 1
-        elif ema9 < ema21 * 0.9999:
-            return -1
-        return 0
-    except Exception as e:
-        log.warning(f"[STRATEGY] HTF compute error: {e}")
-        return 0
+SESSION_1_HOURS  = 12
+REST_HOURS       = 1
+SESSION_2_HOURS  = 11
+TARGET_TRADES    = 100
+MAX_TRADES_S1    = 55   # ~55 trades in session 1
+MAX_TRADES_S2    = 45   # ~45 trades in session 2
 
 
-def _ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+# ─────────────────────────────────────────
+# Main bot loop
+# ─────────────────────────────────────────
+def run_bot():
+    global risk_manager
 
-def _rsi(series, period=14):
-    delta    = series.diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.ewm(span=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, adjust=False).mean()
-    rs       = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    log.info("=" * 55)
+    log.info("  APEX BINARY BOT — 24HR SCHEDULE MODE")
+    log.info(f"  Mode      : {config.MODE.upper()}")
+    log.info(f"  Markets   : {len(config.MARKETS)}")
+    log.info(f"  Schedule  : {SESSION_1_HOURS}h trade → {REST_HOURS}h rest → {SESSION_2_HOURS}h trade")
+    log.info(f"  Target    : {TARGET_TRADES} trades/day")
+    log.info("=" * 55)
 
-def _bollinger(df, period=20, std=2):
-    df["bb_mid"]   = df["close"].rolling(period).mean()
-    df["bb_std"]   = df["close"].rolling(period).std()
-    df["bb_upper"] = df["bb_mid"] + df["bb_std"] * std
-    df["bb_lower"] = df["bb_mid"] - df["bb_std"] * std
-    df["bb_width"] = df["bb_upper"] - df["bb_lower"]
-    return df
+    # ── Connect with retry ───────────────
+    balance = 0.0
+    for attempt in range(1, 6):
+        log.info(f"[BOT] Connecting to Deriv (attempt {attempt}/5) | "
+                 f"App ID: {config.DERIV_APP_ID} | Mode: {config.MODE.upper()}")
+        balance = get_balance()
+        if balance > 0:
+            break
+        log.warning("[BOT] Connection failed. Retrying in 10s...")
+        time.sleep(10)
 
-def _to_df(candles):
-    df = pd.DataFrame(candles)
-    for c in ["open","high","low","close"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df.dropna(subset=["open","high","low","close"], inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
+    if balance <= 0:
+        log.error("=" * 55)
+        log.error("  COULD NOT CONNECT TO DERIV AFTER 5 ATTEMPTS")
+        log.error(f"  App ID : {config.DERIV_APP_ID}")
+        log.error(f"  Token  : {'SET' if config.ACTIVE_TOKEN else 'MISSING'}")
+        log.error("  Fix: Update DERIV_APP_ID + DEMO_TOKEN in Render")
+        log.error("=" * 55)
+        return
 
-# _get_htf_trend replaced by _get_htf_trend_cached above
+    risk_manager = RiskManager(starting_balance=balance)
+    log.info(f"[BOT] Connected | Balance: ${balance:.2f}")
+    send_alert(f"🚀 Apex Bot started\nMode: {config.MODE.upper()}\nBalance: ${balance:.2f}")
 
+    # ── Run 24hr schedule ────────────────
+    while True:
+        try:
+            _run_session("SESSION 1", MAX_TRADES_S1, SESSION_1_HOURS)
 
-def analyze_market(candles, market):
-    if not candles or len(candles) < 30:
-        return None
+            log.info(f"[BOT] 💤 REST period — {REST_HOURS} hour(s)")
+            send_alert(f"💤 Rest period started ({REST_HOURS}h)\n"
+                       f"Balance: ${risk_manager.current_balance:.2f}")
+            time.sleep(REST_HOURS * 3600)
 
-    try:
-        df = _to_df(candles)
-    except Exception as e:
-        log.error(f"[STRATEGY] {market} df error: {e}")
-        return None
+            fresh = get_balance()
+            if fresh > 0:
+                risk_manager.current_balance = fresh
+                log.info(f"[BOT] Balance refreshed after rest: ${fresh:.2f}")
 
-    if len(df) < 30:
-        return None
+            _run_session("SESSION 2", MAX_TRADES_S2, SESSION_2_HOURS)
 
-    df["ema9"]  = _ema(df["close"], 9)
-    df["ema21"] = _ema(df["close"], 21)
-    df["rsi"]   = _rsi(df["close"], 14)
-    df          = _bollinger(df)
+        except Exception as _e:
+            log.error(f"[BOT] Session error: {_e} — restarting in 60s")
+            time.sleep(60)
+            continue
 
-    last  = df.iloc[-1]
-    prev  = df.iloc[-2]
-    prev2 = df.iloc[-3]
-
-    for field in ["ema9","ema21","rsi","bb_mid"]:
-        if pd.isna(last[field]):
-            return _no_signal(market)
-
-    rsi_val = float(last["rsi"])
-
-    # ── Special markets ───────────────────
-    if market in ("BOOM500","BOOM1000"):
-        return _boom_signal(df, market, rsi_val, candles)
-    if market in ("CRASH500","CRASH1000"):
-        return _crash_signal(df, market, rsi_val, candles)
-    if market.startswith("JD"):
-        return _jump_signal(df, market, candles)
-
-    # ── Hard RSI block ────────────────────
-    if rsi_val > 75 or rsi_val < 25:
-        return _no_signal(market)
-
-    ema9_now  = float(last["ema9"])
-    ema21_now = float(last["ema21"])
-    ema9_p1   = float(prev["ema9"])
-    ema21_p1  = float(prev["ema21"])
-    ema9_p2   = float(prev2["ema9"])
-    ema21_p2  = float(prev2["ema21"])
-
-    bull_candle = float(last["close"]) > float(last["open"])
-    bear_candle = float(last["close"]) < float(last["open"])
-    bull_prev   = float(prev["close"]) > float(prev["open"])
-    bear_prev   = float(prev["close"]) < float(prev["open"])
-
-    # BB expanding (good for entries)
-    avg_width  = float(df["bb_width"].mean())
-    last_width = float(last["bb_width"])
-    bb_expanding = last_width > avg_width * 0.85
-
-    # ── Higher timeframe trend filter ─────
-    # For forex: ONLY trade with the 1-hour trend
-    # For synthetics: skip HTF filter (random anyway)
-    htf_trend = 0
-    if config.is_forex(market):
-        htf_trend = _get_htf_trend_cached(market)
-        # If HTF trend is clear, only take aligned signals
-        # This is the key to 75-85% win rate on forex
-
-    # ── Mode A: Fresh EMA crossover ───────
-    cross_up   = ema9_p1 <= ema21_p1 and ema9_now > ema21_now
-    cross_down = ema9_p1 >= ema21_p1 and ema9_now < ema21_now
-
-    if cross_up and 40 <= rsi_val <= 68 and bull_candle:
-        # For forex: only take if HTF agrees or is unclear
-        if config.is_forex(market) and htf_trend == -1:
-            log.debug(f"[STRATEGY] {market} CALL blocked by HTF downtrend")
-            return _no_signal(market)
-        log.info(f"[STRATEGY] {market} Mode A CALL | RSI {rsi_val:.1f} | HTF {htf_trend}")
-        return _build_signal(market, "CALL", "high", candles)
-
-    if cross_down and 32 <= rsi_val <= 60 and bear_candle:
-        if config.is_forex(market) and htf_trend == 1:
-            log.debug(f"[STRATEGY] {market} PUT blocked by HTF uptrend")
-            return _no_signal(market)
-        log.info(f"[STRATEGY] {market} Mode A PUT | RSI {rsi_val:.1f} | HTF {htf_trend}")
-        return _build_signal(market, "PUT", "high", candles)
-
-    # ── Mode B: Trend continuation ────────
-    trend_up   = ema9_now > ema21_now and ema9_p1 > ema21_p1 and ema9_p2 > ema21_p2
-    trend_down = ema9_now < ema21_now and ema9_p1 < ema21_p1 and ema9_p2 < ema21_p2
-
-    if trend_up and 42 <= rsi_val <= 65 and bull_candle and bb_expanding:
-        if config.is_forex(market) and htf_trend == -1:
-            return _no_signal(market)
-        log.info(f"[STRATEGY] {market} Mode B CALL | RSI {rsi_val:.1f} | HTF {htf_trend}")
-        return _build_signal(market, "CALL", "normal", candles)
-
-    if trend_down and 35 <= rsi_val <= 58 and bear_candle and bb_expanding:
-        if config.is_forex(market) and htf_trend == 1:
-            return _no_signal(market)
-        log.info(f"[STRATEGY] {market} Mode B PUT | RSI {rsi_val:.1f} | HTF {htf_trend}")
-        return _build_signal(market, "PUT", "normal", candles)
-
-    # ── Mode C: RSI momentum ──────────────
-    # Only use for synthetics — too noisy for forex
-    if not config.is_forex(market):
-        if rsi_val >= 55 and bull_candle and bull_prev and ema9_now > ema21_now:
-            log.info(f"[STRATEGY] {market} Mode C CALL | RSI {rsi_val:.1f}")
-            return _build_signal(market, "CALL", "normal", candles)
-        if rsi_val <= 45 and bear_candle and bear_prev and ema9_now < ema21_now:
-            log.info(f"[STRATEGY] {market} Mode C PUT | RSI {rsi_val:.1f}")
-            return _build_signal(market, "PUT", "normal", candles)
-
-    return _no_signal(market)
+                # Daily reset
+        log.info("[BOT] 🔄 24hr cycle complete — resetting daily counters")
+        fresh = get_balance()
+        risk_manager.reset_daily(fresh if fresh > 0 else None)
+        send_alert(f"📋 24hr cycle complete\n"
+                   f"Trades: {risk_manager.total_trades}\n"
+                   f"Wins: {risk_manager.total_wins}\n"
+                   f"Losses: {risk_manager.total_losses}\n"
+                   f"Net P&L: ${risk_manager.net_pnl:.2f}\n"
+                   f"Balance: ${risk_manager.current_balance:.2f}")
 
 
-def _build_signal(market, direction, base_confidence, candles):
-    raw    = {"market": market, "direction": direction, "expiry": config.get_expiry(market)}
-    result = sniper_confirm(candles, raw)
-    score  = result.get("score", 0)
-    if score >= 3:
-        result["confidence"] = "high"
-        result["confirmed"]  = True
-    elif score >= 1:
-        result["confidence"] = "normal"
-        result["confirmed"]  = True
+# ─────────────────────────────────────────
+# Trading session
+# ─────────────────────────────────────────
+def _run_session(name: str, max_trades: int, max_hours: int):
+    """Run a trading session until trade target or time limit is hit."""
+    log.info(f"[BOT] ▶ {name} started | Target: {max_trades} trades | "
+             f"Max duration: {max_hours}h")
+    send_alert(f"▶ {name} started\nTarget: {max_trades} trades\n"
+               f"Balance: ${risk_manager.current_balance:.2f}")
+
+    session_trades  = 0
+    session_start   = time.time()
+    max_seconds     = max_hours * 3600
+    scan_count      = 0
+
+    while True:
+        elapsed = time.time() - session_start
+
+        # ── Time limit ───────────────────
+        if elapsed >= max_seconds:
+            log.info(f"[BOT] {name} time limit reached ({max_hours}h)")
+            break
+
+        # ── Trade target ─────────────────
+        if session_trades >= max_trades:
+            log.info(f"[BOT] {name} trade target reached ({max_trades} trades)")
+            break
+
+        # ── Daily loss limit ─────────────
+        if risk_manager.daily_loss_limit_hit():
+            msg = f"🛑 Daily loss limit hit. Stopping all sessions."
+            log.warning(msg)
+            send_alert(msg)
+            _sleep_until_midnight()
+            fresh = get_balance()
+            risk_manager.reset_daily(fresh if fresh > 0 else None)
+            break
+
+        # ── Pause check ──────────────────
+        if risk_manager.is_paused():
+            remaining = risk_manager.pause_remaining()
+            log.info(f"[BOT] ⏸ Paused — resuming in {remaining:.0f}s")
+            time.sleep(min(remaining, 30))
+            continue
+
+        # ── Scan markets ─────────────────
+        scan_count += 1
+        remaining_trades = max_trades - session_trades
+        time_left_min    = (max_seconds - elapsed) / 60
+
+        log.info(f"[BOT] {name} Scan #{scan_count} | "
+                 f"Trades: {session_trades}/{max_trades} | "
+                 f"Time left: {time_left_min:.0f}m | "
+                 f"Balance: ${risk_manager.current_balance:.2f}")
+
+        active = config.get_active_markets()
+        for market in active:
+            # Stop mid-scan if target hit
+            if session_trades >= max_trades:
+                break
+
+            try:
+                candles = get_candles(market)
+                if not candles or len(candles) < 30:
+                    log.warning(f"[{market}] Only {len(candles) if candles else 0} candles — skip")
+                    continue
+
+                signal = analyze_market(candles, market)
+
+                # Track last signal per market for dashboard
+                import bot as _b
+                _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
+                if signal:
+                    _b.last_signals.append({
+                        "market":     market,
+                        "direction":  signal.get("direction","NONE"),
+                        "confidence": signal.get("confidence","low"),
+                        "timestamp":  __import__("datetime").datetime.utcnow().strftime("%H:%M:%S")
+                    })
+                    if len(_b.last_signals) > 30:
+                        _b.last_signals = _b.last_signals[-30:]
+
+                if not signal or signal.get("direction") == "NONE":
+                    log.debug(f"[{market}] No signal")
+                    continue
+
+                if not signal.get("confirmed", False):
+                    log.info(f"[{market}] {signal.get('direction')} signal score "
+                             f"{signal.get('score',0)}/5 — not confirmed, skip")
+                    continue
+
+                direction  = signal["direction"]
+                confidence = signal.get("confidence", "normal")
+                expiry     = config.get_expiry(market)
+
+                # ── Staking engine ────────
+                stake = staking_engine.get_stake() if staking_engine else _calculate_stake()
+
+                log.info(f"[{market}] ⚡ {direction} | "
+                         f"Conf: {confidence} | "
+                         f"Expiry: {expiry}m | "
+                         f"Stake: ${stake:.2f}")
+
+                send_signal(
+                    market=market,
+                    direction=direction,
+                    expiry=expiry,
+                    confidence=confidence,
+                    stake=stake
+                )
+
+                # ── Signal only mode ─────
+                # Set SIGNAL_ONLY=true in Render env to
+                # watch signals without placing real trades
+                if os.getenv("SIGNAL_ONLY","false").lower() == "true":
+                    log.info(f"[{market}] 📡 SIGNAL ONLY — {direction} "
+                             f"(no trade placed)")
+                    session_trades += 1
+                    continue
+
+                # ── Place trade ───────────
+                trade = place_trade(
+                    symbol=market,
+                    direction=direction,
+                    stake=stake,
+                    duration_minutes=expiry
+                )
+
+                if not trade:
+                    log.error(f"[{market}] Trade placement failed")
+                    continue
+
+                session_trades += 1
+                contract_id = trade["contract_id"]
+                log.info(f"[{market}] Trade #{session_trades} placed — "
+                         f"contract #{contract_id}")
+
+                # ── Wait for settlement ───
+                _wait_for_settlement(expiry, market)
+
+                # ── Get result with retry ──
+                outcome = None
+                for _attempt in range(10):
+                    outcome = get_contract_result(contract_id)
+                    if outcome and outcome.get("status") in ("won","lost"):
+                        break
+                    log.info(f"[{market}] Contract #{contract_id} still open, "
+                             f"retry {_attempt+1}/10 in 8s...")
+                    time.sleep(8)
+
+                if outcome and outcome.get("status") in ("won","lost"):
+                    _handle_outcome(market, direction, stake,
+                                    outcome, risk_manager, trade, signal)
+                else:
+                    log.warning(f"[{market}] Could not get result for #{contract_id} after retries")
+                    # Save as open so it still appears in history
+                    _save_trade({
+                        "contract_id": contract_id,
+                        "symbol":      market,
+                        "direction":   direction,
+                        "stake":       round(stake, 2),
+                        "payout":      round(float(trade.get("payout", 0)), 2),
+                        "result":      "open",
+                        "profit":      0,
+                        "expiry":      expiry,
+                        "confidence":  signal.get("confidence","normal"),
+                    })
+
+            except Exception as e:
+                log.error(f"[{market}] Error: {e}", exc_info=True)
+                continue
+
+        time.sleep(config.SCAN_INTERVAL)
+
+    # ── Session summary ──────────────────
+    log.info(f"[BOT] {name} complete | "
+             f"Trades: {session_trades} | "
+             f"Balance: ${risk_manager.current_balance:.2f}")
+
+
+# ─────────────────────────────────────────
+# Compounding stake calculation
+# ─────────────────────────────────────────
+def _calculate_stake() -> float:
+    """
+    Calculate stake with optional compounding.
+
+    If COMPOUND=true:
+        Stakes grow as balance grows.
+        Uses current_balance * STAKE_PERCENT.
+
+    If COMPOUND=false:
+        Fixed stake based on starting balance.
+        Safer — losses don't shrink future stakes.
+    """
+    if config.COMPOUND:
+        # Compound: stake grows with balance
+        balance = risk_manager.current_balance
     else:
-        if base_confidence == "high":
-            result["confirmed"]  = True
-            result["confidence"] = "normal"
+        # Fixed: always use starting balance as base
+        balance = risk_manager.starting_balance
+
+    stake = balance * (config.STAKE_PERCENT / 100)
+    stake = max(stake, 0.35)            # Deriv minimum
+    stake = min(stake, balance * 0.02)  # hard cap 2%
+    return round(stake, 2)
+
+
+# ─────────────────────────────────────────
+# Handle trade outcome
+# ─────────────────────────────────────────
+def _handle_outcome(market, direction, stake, outcome,
+                    risk: RiskManager,
+                    trade: dict = None,
+                    signal: dict = None):
+    status      = outcome.get("status", "unknown")
+    profit      = float(outcome.get("profit", 0))
+    confidence  = signal.get("confidence", "normal") if signal else "normal"
+    expiry      = signal.get("expiry", config.get_expiry(market)) if signal else config.get_expiry(market)
+    payout      = trade.get("payout", 0) if trade else 0
+    contract_id = trade.get("contract_id", "—") if trade else "—"
+
+    # Save to history first
+    _save_trade({
+        "contract_id": contract_id,
+        "symbol":      market,
+        "direction":   direction,
+        "stake":       round(stake, 2),
+        "payout":      round(float(payout), 2),
+        "result":      status,
+        "profit":      round(profit if status == "won" else -stake, 2),
+        "expiry":      expiry,
+        "confidence":  confidence,
+    })
+
+    if status == "won":
+        log.info(f"[{market}] ✅ WON +${profit:.2f} | "
+                 f"Balance: ${risk.current_balance + profit:.2f}")
+        risk.record_win(profit)
+        if staking_engine: staking_engine.record_win(profit)
+        send_alert(f"✅ {market} {direction} WON +${profit:.2f}\n"
+                   f"Balance: ${risk.current_balance:.2f}")
+
+    elif status == "lost":
+        log.info(f"[{market}] ❌ LOST -${stake:.2f} | "
+                 f"Balance: ${risk.current_balance - stake:.2f}")
+        risk.record_loss(stake)
+        if staking_engine: staking_engine.record_loss(stake)
+        send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
+                   f"Balance: ${risk.current_balance:.2f}")
+
+        if risk.consecutive_losses >= config.MAX_CONSECUTIVE_LOSS:
+            risk.trigger_pause()
+            msg = (f"⏸ {config.MAX_CONSECUTIVE_LOSS} losses in a row.\n"
+                   f"Pausing {config.PAUSE_DURATION // 60} minutes.")
+            log.warning(msg)
+            send_alert(msg)
+    else:
+        log.warning(f"[{market}] Unknown result: {status}")
+
+
+# ─────────────────────────────────────────
+# Save trade to history
+# ─────────────────────────────────────────
+def _save_trade(trade: dict):
+    history_file = "trade_history.json"
+    empty = {"trades": [], "total_trades": 0,
+             "total_wins": 0, "total_losses": 0, "net_pnl": 0.0}
+    try:
+        if os.path.exists(history_file):
+            with open(history_file, "r") as f:
+                data = json.load(f)
         else:
-            result["confirmed"] = False
-    return result
+            data = empty
+
+        for k, v in empty.items():
+            if k not in data:
+                data[k] = v
+
+        trade["time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        data["trades"].append(trade)
+        data["total_trades"] += 1
+
+        if trade.get("result") == "won":
+            data["total_wins"] += 1
+            data["net_pnl"]     = round(data["net_pnl"] + abs(float(trade.get("profit", 0))), 2)
+        else:
+            data["total_losses"] += 1
+            data["net_pnl"]      = round(data["net_pnl"] - float(trade.get("stake", 0)), 2)
+
+        if len(data["trades"]) > 500:
+            data["trades"] = data["trades"][-500:]
+
+        with open(history_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+        log.info(f"[HISTORY] {trade['symbol']} {trade['direction']} "
+                 f"{trade['result'].upper()} saved.")
+    except Exception as e:
+        log.error(f"[HISTORY] Failed to save: {e}")
 
 
-def _boom_signal(df, market, rsi_val, candles):
-    last = df.iloc[-1]
-    if float(last["ema9"]) < float(last["ema21"]) and rsi_val < 45:
-        log.info(f"[STRATEGY] {market} BOOM CALL RSI {rsi_val:.1f}")
-        return _build_signal(market, "CALL", "normal", candles)
-    return _no_signal(market)
+# ─────────────────────────────────────────
+# Wait for contract settlement
+# ─────────────────────────────────────────
+def _wait_for_settlement(expiry_minutes: int, market: str = ""):
+    # 1HZ markets tick every second — add extra buffer
+    extra = 15 if "HZ" in market else 8
+    wait  = (expiry_minutes * 60) + extra
+    log.info(f"[BOT] Waiting {wait}s for settlement ({market})...")
+    time.sleep(wait)
 
 
-def _crash_signal(df, market, rsi_val, candles):
-    last = df.iloc[-1]
-    if float(last["ema9"]) > float(last["ema21"]) and rsi_val > 55:
-        log.info(f"[STRATEGY] {market} CRASH PUT RSI {rsi_val:.1f}")
-        return _build_signal(market, "PUT", "normal", candles)
-    return _no_signal(market)
+# ─────────────────────────────────────────
+# Sleep until midnight
+# ─────────────────────────────────────────
+def _sleep_until_midnight():
+    from datetime import timedelta
+    now      = datetime.now()
+    midnight = now.replace(hour=0, minute=0, second=5, microsecond=0)
+    if midnight <= now:
+        midnight += timedelta(days=1)
+    seconds = (midnight - now).total_seconds()
+    log.info(f"[BOT] Sleeping {seconds/3600:.1f}h until midnight...")
+    time.sleep(seconds)
 
 
-def _jump_signal(df, market, candles):
-    if len(df) < 5:
-        return _no_signal(market)
-    last      = df.iloc[-1]
-    avg_body  = (df["close"] - df["open"]).abs().tail(20).mean()
-    last_body = abs(float(last["close"]) - float(last["open"]))
-    if avg_body > 0 and last_body > avg_body * 4:
-        direction = "PUT" if float(last["close"]) > float(last["open"]) else "CALL"
-        log.info(f"[STRATEGY] {market} JUMP spike {direction}")
-        return _build_signal(market, direction, "normal", candles)
-    return _no_signal(market)
-
-
-def _no_signal(market):
-    return {
-        "market": market, "direction": "NONE",
-        "confidence": "low", "confirmed": False,
-        "score": 0, "reasons": [],
-        "expiry": config.get_expiry(market)
-    }
+if __name__ == "__main__":
+    run_bot()
