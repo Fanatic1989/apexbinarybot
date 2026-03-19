@@ -422,9 +422,14 @@ def _save_trade(trade: dict):
 # Wait for contract settlement
 # ─────────────────────────────────────────
 def _wait_for_settlement(expiry_minutes: int, market: str = ""):
-    # 1HZ markets tick every second — add extra buffer
-    extra = 15 if "HZ" in market else 8
-    wait  = (expiry_minutes * 60) + extra
+    # Extra buffer per market type
+    if "HZ" in market:
+        extra = 15    # 1HZ fast tick markets
+    elif market.startswith("frx"):
+        extra = 20    # Forex — slightly slower settlement
+    else:
+        extra = 8     # Standard synthetics
+    wait = (expiry_minutes * 60) + extra
     log.info(f"[BOT] Waiting {wait}s for settlement ({market})...")
     time.sleep(wait)
 
