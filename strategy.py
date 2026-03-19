@@ -220,18 +220,38 @@ def _build_signal(market, direction, base_confidence, candles):
 
 
 def _boom_signal(df, market, rsi_val, candles):
+    """
+    Boom indices drift down then spike UP.
+    Enter CALL when RSI shows oversold drift but not extreme spike.
+    RSI below 15 means spike may already be firing.
+    """
     last = df.iloc[-1]
-    if float(last["ema9"]) < float(last["ema21"]) and rsi_val < 45:
+    ema_down = float(last["ema9"]) < float(last["ema21"])
+    # RSI between 20-40: oversold drift, good entry
+    # RSI below 18: spike may already be in progress
+    if ema_down and 18 <= rsi_val <= 42:
         log.info(f"[STRATEGY] {market} BOOM CALL RSI {rsi_val:.1f}")
         return _build_signal(market, "CALL", "normal", candles)
+    if rsi_val < 18:
+        log.debug(f"[STRATEGY] {market} BOOM RSI {rsi_val:.1f} too extreme — skip")
     return _no_signal(market)
 
 
 def _crash_signal(df, market, rsi_val, candles):
+    """
+    Crash indices drift up then crash DOWN.
+    Enter PUT when RSI shows overbought but not extreme.
+    RSI 99.9 means the crash ALREADY happened — don't enter after.
+    """
     last = df.iloc[-1]
-    if float(last["ema9"]) > float(last["ema21"]) and rsi_val > 55:
+    ema_up = float(last["ema9"]) > float(last["ema21"])
+    # RSI between 60-80: overbought drift, good entry
+    # RSI above 85: spike already in progress, too late
+    if ema_up and 60 <= rsi_val <= 82:
         log.info(f"[STRATEGY] {market} CRASH PUT RSI {rsi_val:.1f}")
         return _build_signal(market, "PUT", "normal", candles)
+    if rsi_val > 82:
+        log.debug(f"[STRATEGY] {market} CRASH RSI {rsi_val:.1f} too extreme — skip")
     return _no_signal(market)
 
 
