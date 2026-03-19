@@ -407,7 +407,8 @@ def _save_trade(trade: dict):
              "total_wins": 0, "total_losses": 0, "net_pnl": 0.0}
 
     # Ensure all required fields exist
-    trade.setdefault("time",        datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
+    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    trade.setdefault("time",        now_str)
     trade.setdefault("symbol",      "unknown")
     trade.setdefault("direction",   "unknown")
     trade.setdefault("stake",       0)
@@ -416,6 +417,7 @@ def _save_trade(trade: dict):
     trade.setdefault("profit",      0)
     trade.setdefault("expiry",      0)
     trade.setdefault("confidence",  "normal")
+    trade.setdefault("contract_id", "—")
 
     # Convert all numeric fields safely
     trade["stake"]  = round(float(trade["stake"]),  2)
