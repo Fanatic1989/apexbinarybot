@@ -454,20 +454,25 @@ function loadTrades() {
       const tradeTime = t.time ? new Date(t.time.replace(' UTC','Z')) : null;
       const expiryMin = parseFloat(t.expiry||0);
       const settleAt  = tradeTime ? new Date(tradeTime.getTime() + expiryMin*60000) : null;
-      const isOpen    = t.result === 'open' || t.result === 'unresolved';
       const tid       = 'timer-' + (t.contract_id||Math.random().toString(36).slice(2));
+      const nowMs     = Date.now();
+      const settled   = t.result === 'won' || t.result === 'lost';
+      const leftMs    = settleAt ? (settleAt - nowMs) : -1;
 
       let timerHtml;
-      if (!isOpen || !settleAt) {
+      if (!settleAt) {
         timerHtml = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">—</span>';
+      } else if (settled && leftMs <= 0) {
+        // Already settled — show the final result indicator
+        const resultIcon = t.result === 'won'
+          ? '<span style="font-family:var(--mono);font-size:12px;color:#00f5a0;font-weight:700">✓ WIN</span>'
+          : '<span style="font-family:var(--mono);font-size:12px;color:#ff4d6d;font-weight:700">✗ LOSS</span>';
+        timerHtml = resultIcon;
+      } else if (leftMs <= 0) {
+        timerHtml = '<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
       } else {
-        const nowMs   = Date.now();
-        const leftMs  = settleAt - nowMs;
-        if (leftMs <= 0) {
-          timerHtml = '<span style="color:var(--amber);font-family:var(--mono);font-size:11px">Settling...</span>';
-        } else {
-          timerHtml = `<span id="${tid}" data-settle="${settleAt.getTime()}" style="font-family:var(--mono);font-size:11px;color:var(--amber)">—</span>`;
-        }
+        // Active countdown — always show regardless of result status
+        timerHtml = `<span id="${tid}" data-settle="${settleAt.getTime()}" data-duration="${expiryMin}" data-result="${t.result||'open'}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:#00f5a0">—</span>`;
       }
 
       html += `<tr data-contract="${t.contract_id||''}">
@@ -608,29 +613,50 @@ setInterval(loadAll, 5000);
 function tickTimers() {
   const now = Date.now();
   document.querySelectorAll('[data-settle]').forEach(el => {
-    const settle = parseInt(el.dataset.settle);
-    const left   = settle - now;
+    const settle  = parseInt(el.dataset.settle);
+    const left    = settle - now;
+    const totalMs = settle - (settle - parseFloat(el.dataset.total||0));
+
     if (left <= 0) {
-      el.textContent = 'Settling...';
-      el.style.color = 'var(--amber)';
+      el.removeAttribute('data-settle');
+      el.innerHTML = '<span style="color:var(--amber);animation:blink 1s infinite">Settling...</span>';
       return;
     }
-    const mins = Math.floor(left / 60000);
-    const secs = Math.floor((left % 60000) / 1000);
-    el.textContent = mins > 0
+
+    const mins   = Math.floor(left / 60000);
+    const secs   = Math.floor((left % 60000) / 1000);
+    const tenths = Math.floor((left % 1000) / 100);
+    const timeStr = mins > 0
       ? `${mins}m ${secs.toString().padStart(2,'0')}s`
-      : `${secs}s`;
-    // Color changes as time runs out
-    if (left < 30000) {
-      el.style.color = 'var(--red)';
-    } else if (left < 60000) {
-      el.style.color = 'var(--amber)';
-    } else {
-      el.style.color = '#00f5a0';
-    }
+      : `${secs}.${tenths}s`;
+
+    // Progress bar width
+    const pct = Math.max(0, Math.min(100, (left / (parseFloat(el.dataset.duration||1)*60000)) * 100));
+
+    // Color gradient: green → amber → red
+    let color, barColor;
+    if (left > 60000)      { color = '#00f5a0'; barColor = '#00f5a0'; }
+    else if (left > 30000) { color = '#ffb347'; barColor = '#ffb347'; }
+    else if (left > 10000) { color = '#ff9100'; barColor = '#ff9100'; }
+    else                   { color = '#ff4d6d'; barColor = '#ff4d6d'; }
+
+    el.style.color = color;
+    el.innerHTML = `
+      <div style="text-align:center">
+        <div style="font-size:12px;font-weight:700;font-family:var(--mono)">${timeStr}</div>
+        <div style="width:60px;height:3px;background:rgba(255,255,255,0.1);border-radius:2px;margin:3px auto 0">
+          <div style="width:${pct}%;height:3px;background:${barColor};border-radius:2px;transition:width 0.1s"></div>
+        </div>
+      </div>`;
   });
 }
-setInterval(tickTimers, 1000);
+
+// Add blink animation
+const style = document.createElement('style');
+style.textContent = '@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}';
+document.head.appendChild(style);
+
+setInterval(tickTimers, 100);
 tickTimers();
 </script>
 </body>
