@@ -233,34 +233,38 @@ def get_contract_result(contract_id):
                     "contract_id": contract_id
                 }
 
-        # Fallback: profit_table for already-settled contracts
+        # Fallback: profit_table — fetch more records and match by contract_id
         ws.send(json.dumps({
             "profit_table": 1,
             "description":  1,
             "sort":         "DESC",
-            "limit":        10
+            "limit":        50
         }))
         pt = json.loads(ws.recv())
 
         if "profit_table" in pt:
-            for txn in pt["profit_table"].get("transactions", []):
-                if str(txn.get("contract_id")) == str(contract_id):
+            txns = pt["profit_table"].get("transactions", [])
+            log.debug(f"[DERIV] profit_table has {len(txns)} transactions")
+            for txn in txns:
+                txn_cid = str(txn.get("contract_id","")).strip()
+                our_cid = str(contract_id).strip()
+                if txn_cid == our_cid:
                     sell_price = float(txn.get("sell_price", 0))
                     buy_price  = float(txn.get("buy_price",  0))
                     profit     = round(sell_price - buy_price, 2)
-                    status     = "won" if sell_price > buy_price else "lost"
+                    status     = "won" if profit > 0 else "lost"
                     log.info(f"[DERIV] Contract #{contract_id} found in profit_table → "
                              f"{status.upper()} profit=${profit:.2f}")
                     return {
                         "status":      status,
-                        "profit":      profit,
+                        "profit":      abs(profit) if status=="won" else profit,
                         "entry_spot":  txn.get("purchase_time"),
                         "exit_spot":   txn.get("sell_time"),
                         "contract_id": contract_id
                     }
 
-        # Still open or not found
-        log.debug(f"[DERIV] Contract #{contract_id} still open or not in profit_table")
+        # Still open
+        log.debug(f"[DERIV] Contract #{contract_id} not settled yet")
         return {"status": "open", "profit": 0, "contract_id": contract_id}
 
     except Exception as e:
