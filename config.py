@@ -1,182 +1,163 @@
-import websocket
-import json
-import time
-import logging
-import config
+import os
+from datetime import datetime, timezone
 
-log = logging.getLogger(__name__)
-DERIV_WS = f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}"
+# ─────────────────────────────────────────
+# Deriv API
+# ─────────────────────────────────────────
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")
+DEMO_TOKEN   = os.getenv("DEMO_TOKEN", "")
+LIVE_TOKEN   = os.getenv("LIVE_TOKEN", "")
+MODE         = os.getenv("MODE", "demo").lower()
 
-def _open_ws(timeout=15):
-    ws = websocket.create_connection(DERIV_WS, timeout=timeout)
-    ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
-    resp = json.loads(ws.recv())
-    if "error" in resp:
-        ws.close()
-        raise ConnectionError(f"Auth failed: {resp['error']['message']}")
-    return ws
+def get_active_token():
+    if MODE == "live":
+        if not LIVE_TOKEN:
+            raise ValueError("LIVE_TOKEN not set but MODE=live")
+        return LIVE_TOKEN
+    if not DEMO_TOKEN:
+        raise ValueError("DEMO_TOKEN not set but MODE=demo")
+    return DEMO_TOKEN
 
-def get_candles(symbol, count=None, granularity=None, retries=3):
-    count       = count       or config.CANDLE_COUNT
-    granularity = granularity or config.CANDLE_GRANULARITY
-    for attempt in range(1, retries + 1):
-        ws = None
-        try:
-            ws = _open_ws()
-            ws.send(json.dumps({
-                "ticks_history": symbol,
-                "adjust_start_time": 1,
-                "count": count,
-                "end": "latest",
-                "style": "candles",
-                "granularity": granularity
-            }))
-            result = json.loads(ws.recv())
-            if "error" in result:
-                log.warning(f"[DERIV] {symbol} candle error: {result['error']['message']}")
-                return []
-            if "candles" not in result:
-                return []
-            return [{
-                "open":  float(c["open"]),
-                "high":  float(c["high"]),
-                "low":   float(c["low"]),
-                "close": float(c["close"]),
-                "epoch": int(c["epoch"])
-            } for c in result["candles"]]
-        except Exception as e:
-            log.error(f"[DERIV] Attempt {attempt}/{retries} for {symbol}: {e}")
-            if attempt < retries:
-                time.sleep(3 * attempt)
-        finally:
-            if ws:
-                try: ws.close()
-                except: pass
-    return []
+ACTIVE_TOKEN = get_active_token()
 
-def get_htf_candles(symbol, retries=2):
-    """Fetch 1-hour candles for higher timeframe trend filter."""
-    return get_candles(
-        symbol,
-        count=config.HTF_COUNT,
-        granularity=config.HTF_GRANULARITY,
-        retries=retries
-    )
+# ─────────────────────────────────────────
+# Scan & candle settings
+# ─────────────────────────────────────────
+SCAN_INTERVAL      = int(os.getenv("SCAN_INTERVAL", 60))
+CANDLE_GRANULARITY = 60
+CANDLE_COUNT       = 120
+HTF_GRANULARITY    = 3600
+HTF_COUNT          = 50
 
-def get_balance():
-    ws = None
-    try:
-        ws = _open_ws()
-        ws.send(json.dumps({"balance": 1, "subscribe": 0}))
-        result = json.loads(ws.recv())
-        if "error" in result:
-            log.error(f"[DERIV] Balance error: {result['error']['message']}")
-            return 0.0
-        return float(result["balance"]["balance"])
-    except Exception as e:
-        log.error(f"[DERIV] Balance fetch failed: {e}")
-        return 0.0
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
+# ─────────────────────────────────────────
+# Markets
+# ─────────────────────────────────────────
+SYNTHETIC_MARKETS = [
+    "R_50", "R_75", "R_100",
+    "1HZ50V", "1HZ75V", "1HZ100V",
+    "JD50", "JD75", "JD100",
+    "BOOM500", "BOOM1000",
+    "CRASH500", "CRASH1000",
+]
 
-def place_trade(symbol, direction, stake, duration_minutes):
-    """
-    Place a binary options trade.
-    For forex pairs, automatically tries multiple durations
-    until one is accepted by Deriv.
-    """
-    # Build list of durations to try
-    if symbol.startswith("frx"):
-        # Try different durations for forex
-        durations_to_try = [(d, "m") for d in [15, 30, 60, 120]]
-    else:
-        durations_to_try = [(duration_minutes, "m")]
+FOREX_MARKETS = [
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY",
+    "frxAUDUSD", "frxUSDCAD", "frxUSDCHF",
+    "frxEURGBP", "frxEURJPY", "frxGBPJPY",
+]
 
-    ws = None
-    try:
-        ws = _open_ws()
+ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD", "frxEURJPY"]
 
-        for dur, unit in durations_to_try:
-            ws.send(json.dumps({
-                "proposal": 1,
-                "amount": round(stake, 2),
-                "basis": "stake",
-                "contract_type": "CALL" if direction == "CALL" else "PUT",
-                "currency": "USD",
-                "duration": dur,
-                "duration_unit": unit,
-                "symbol": symbol
-            }))
-            proposal = json.loads(ws.recv())
+MARKETS = list(dict.fromkeys(FOREX_MARKETS + SYNTHETIC_MARKETS))
 
-            if "error" in proposal:
-                err_msg = proposal['error']['message']
-                if "duration" in err_msg.lower() or "trading is not offered" in err_msg.lower():
-                    log.warning(f"[DERIV] {symbol} duration {dur}{unit} not valid, trying next...")
-                    continue
-                log.error(f"[DERIV] Proposal error {symbol}: {err_msg}")
-                return {}
+# ─────────────────────────────────────────
+# Session detection
+# ─────────────────────────────────────────
+def get_current_session() -> str:
+    hour = datetime.now(timezone.utc).hour
+    if 13 <= hour < 17:  return "LONDON_NY_OVERLAP"
+    if 8  <= hour < 17:  return "LONDON"
+    if 17 <= hour < 20:  return "NEW_YORK"
+    if 0  <= hour < 7:   return "ASIAN"
+    return "DEAD_ZONE"
 
-            # Valid proposal found
-            proposal_id  = proposal["proposal"]["id"]
-            payout       = proposal["proposal"]["payout"]
-            actual_dur   = dur
-            log.info(f"[DERIV] Proposal OK {symbol} {direction} "
-                     f"${stake} | {dur}{unit} | payout ${payout:.2f}")
+def is_weekend() -> bool:
+    day  = datetime.now(timezone.utc).weekday()
+    hour = datetime.now(timezone.utc).hour
+    if day == 4 and hour >= 21: return True
+    if day == 5:                return True
+    if day == 6 and hour < 21:  return True
+    return False
 
-            ws.send(json.dumps({"buy": proposal_id, "price": round(stake, 2)}))
-            result = json.loads(ws.recv())
+def get_active_markets() -> list:
+    if is_weekend():
+        return SYNTHETIC_MARKETS
+    session = get_current_session()
+    if session in ("LONDON_NY_OVERLAP", "LONDON", "NEW_YORK"):
+        return FOREX_MARKETS + SYNTHETIC_MARKETS
+    if session == "ASIAN":
+        return ASIAN_FOREX + SYNTHETIC_MARKETS
+    return SYNTHETIC_MARKETS
 
-            if "error" in result:
-                log.error(f"[DERIV] Buy error {symbol}: {result['error']['message']}")
-                return {}
+# ─────────────────────────────────────────
+# Expiry (minutes)
+# ─────────────────────────────────────────
+SYNTHETIC_EXPIRY = {
+    "R_50": 3,   "R_75": 3,   "R_100": 2,
+    "1HZ50V": 1, "1HZ75V": 1, "1HZ100V": 1,
+    "JD50": 1,   "JD75": 1,   "JD100": 1,
+    "BOOM500": 1,  "BOOM1000": 1,
+    "CRASH500": 1, "CRASH1000": 1,
+}
 
-            return {
-                "contract_id":  result["buy"]["contract_id"],
-                "symbol":       symbol,
-                "direction":    direction,
-                "stake":        stake,
-                "payout":       payout,
-                "duration_min": actual_dur
-            }
+FOREX_EXPIRY_OPTIONS = [15, 30, 60, 120]
 
-        log.error(f"[DERIV] No valid duration found for {symbol}")
-        return {}
+def get_expiry(market: str) -> int:
+    if is_forex(market):
+        return FOREX_EXPIRY_OPTIONS[0]
+    return SYNTHETIC_EXPIRY.get(market, 3)
 
-    except Exception as e:
-        log.error(f"[DERIV] place_trade exception {symbol}: {e}")
-        return {}
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
+def is_forex(market: str) -> bool:
+    return market.startswith("frx")
 
-def get_contract_result(contract_id):
-    ws = None
-    try:
-        ws = _open_ws()
-        ws.send(json.dumps({
-            "proposal_open_contract": 1,
-            "contract_id": contract_id
-        }))
-        result = json.loads(ws.recv())
-        if "error" in result:
-            log.error(f"[DERIV] Contract result error: {result['error']['message']}")
-            return {}
-        contract = result.get("proposal_open_contract", {})
-        return {
-            "status":      contract.get("status", "open"),
-            "profit":      float(contract.get("profit", 0)),
-            "entry_spot":  contract.get("entry_spot"),
-            "exit_spot":   contract.get("exit_spot"),
-            "contract_id": contract_id
-        }
-    except Exception as e:
-        log.error(f"[DERIV] get_contract_result exception: {e}")
-        return {}
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
+# ─────────────────────────────────────────
+# Risk management
+# ─────────────────────────────────────────
+STAKE_PERCENT        = float(os.getenv("STAKE_PERCENT", 1.0))
+MAX_DAILY_LOSS_PCT   = float(os.getenv("MAX_DAILY_LOSS_PCT", 10.0))
+MAX_CONSECUTIVE_LOSS = int(os.getenv("MAX_CONSECUTIVE_LOSS", 3))
+DAILY_PROFIT_TARGET  = float(os.getenv("DAILY_PROFIT_TARGET", 5.0))
+PAUSE_DURATION       = int(os.getenv("PAUSE_DURATION", 1800))
+
+# ─────────────────────────────────────────
+# Account
+# ─────────────────────────────────────────
+CURRENCY         = os.getenv("CURRENCY", "USD")
+COMPOUND         = os.getenv("COMPOUND", "false").lower() == "true"
+COMPOUND_PERCENT = float(os.getenv("COMPOUND_PERCENT", 50.0))
+
+# ─────────────────────────────────────────
+# Admin / server
+# ─────────────────────────────────────────
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+PORT           = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
+
+# ─────────────────────────────────────────
+# Telegram
+# ─────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# ─────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# ─────────────────────────────────────────
+# Staking
+# ─────────────────────────────────────────
+STAKING_STRATEGY = os.getenv("STAKING_STRATEGY", "flat").lower()
+
+# ─────────────────────────────────────────
+# Validation
+# ─────────────────────────────────────────
+def validate_config():
+    errors = []
+    if not DERIV_APP_ID:
+        errors.append("DERIV_APP_ID not set")
+    if MODE not in ("demo", "live"):
+        errors.append(f"MODE must be demo or live, got: {MODE}")
+    if not ACTIVE_TOKEN:
+        errors.append("No active token available")
+    if SCAN_INTERVAL < 15:
+        errors.append("SCAN_INTERVAL must be at least 15 seconds")
+    for e in errors:
+        print(f"[CONFIG ERROR] {e}")
+    if errors:
+        raise SystemExit("Fix config errors before starting.")
+    print(f"[CONFIG] OK | Mode: {MODE.upper()} | "
+          f"Markets: {len(MARKETS)} | Interval: {SCAN_INTERVAL}s | "
+          f"Compound: {COMPOUND} | Staking: {STAKING_STRATEGY.upper()}")
+
+validate_config()
