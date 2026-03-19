@@ -426,6 +426,11 @@ def _handle_outcome(market, direction, stake, outcome,
                    f"Balance: ${risk.current_balance:.2f}")
         # Reset market loss counter on win
         _bm._market_losses[market] = 0
+        # Feed result back to AI
+        try:
+            from strategy import record_trade_outcome
+            record_trade_outcome(market, signal.get("strategy",""), "won")
+        except: pass
 
     elif status == "lost":
         log.info(f"[{market}] ❌ LOST -${stake:.2f} | "
@@ -435,6 +440,11 @@ def _handle_outcome(market, direction, stake, outcome,
         send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
                    f"Balance: ${risk.current_balance:.2f}")
 
+        # Feed result back to AI
+        try:
+            from strategy import record_trade_outcome
+            record_trade_outcome(market, signal.get("strategy",""), "lost")
+        except: pass
         # Track per-market losses
         _bm._market_losses[market] = _bm._market_losses.get(market, 0) + 1
         if _bm._market_losses[market] >= 2:
