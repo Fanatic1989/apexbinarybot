@@ -36,8 +36,8 @@ SYNTHETIC_MARKETS = [
     "R_50", "R_75", "R_100",
     "1HZ50V", "1HZ75V", "1HZ100V",
     "JD50", "JD75", "JD100",
-    "BOOM500", "BOOM1000",
-    "CRASH500", "CRASH1000",
+    # BOOM/CRASH removed — don't support Rise/Fall binary contracts
+    # Use Deriv's dedicated Boom/Crash product instead
 ]
 
 FOREX_MARKETS = [
