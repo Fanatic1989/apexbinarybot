@@ -248,6 +248,31 @@ def test_connection():
     return jsonify(results)
 
 # ─────────────────────────────────────────
+# Watchdog — auto restart bot if it crashes
+# ─────────────────────────────────────────
+def _watchdog():
+    """
+    Runs in background. If bot_running=True but
+    thread is dead, restarts the bot automatically.
+    """
+    import time as _time
+    _time.sleep(60)  # initial delay
+    while True:
+        global bot_thread, bot_running
+        if bot_running and (bot_thread is None or not bot_thread.is_alive()):
+            log.warning("[WATCHDOG] Bot thread died — auto restarting...")
+            bot_thread = threading.Thread(
+                target=_run_bot_safe, daemon=True, name="BotThread"
+            )
+            bot_thread.start()
+            log.info("[WATCHDOG] Bot restarted.")
+        _time.sleep(30)
+
+# Start watchdog on import
+_watchdog_thread = threading.Thread(target=_watchdog, daemon=True, name="Watchdog")
+_watchdog_thread.start()
+
+# ─────────────────────────────────────────
 # Bot runner wrapper
 # ─────────────────────────────────────────
 def _run_bot_safe():
