@@ -147,16 +147,6 @@ def _run_session(name: str, max_trades: int, max_hours: int):
             risk_manager.reset_daily(fresh if fresh > 0 else None)
             break
 
-        # ── Daily profit target ──────────
-        if risk_manager.daily_profit_target_hit():
-            msg = f"🎯 Daily profit target hit! Stopping for today."
-            log.info(msg)
-            send_alert(msg)
-            _sleep_until_midnight()
-            fresh = get_balance()
-            risk_manager.reset_daily(fresh if fresh > 0 else None)
-            break
-
         # ── Pause check ──────────────────
         if risk_manager.is_paused():
             remaining = risk_manager.pause_remaining()
