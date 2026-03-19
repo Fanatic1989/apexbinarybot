@@ -162,6 +162,17 @@
     </div>
   </div>
 
+  <!-- AI Strategy Panel -->
+  <div class="card" id="ai-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <span class="ctitle" style="margin-bottom:0">🤖 AI Strategy Performance</span>
+      <span id="ai-active-pill" class="pill pb">Analysing...</span>
+    </div>
+    <div id="ai-strategy-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
+      <div style="color:var(--muted);font-size:12px;padding:8px">Waiting for trade data...</div>
+    </div>
+  </div>
+
   <!-- Session performance -->
   <div class="card">
     <div class="ctitle">Session Performance</div>
@@ -220,6 +231,7 @@ function loadStatus(){
       setText('m-con', r.consec_losses||0);
     }
     if(d.last_signals) buildMktGrid(d.last_signals);
+    if(d.ai_strategy) buildAIPanel(d.ai_strategy);
   });
 }
 
@@ -463,6 +475,39 @@ function toast(msg){
   t.textContent=msg;t.style.display='block';
   setTimeout(()=>t.style.display='none',2500);
 }
+function buildAIPanel(ai){
+  if(!ai||!ai.win_rates) return;
+  const NAMES = {
+    rsi_reversal:'RSI Reversal', bb_bounce:'BB Bounce',
+    ema_triple:'EMA Triple', false_breakout:'False Breakout',
+    momentum_streak:'Momentum'
+  };
+  const rates = ai.win_rates;
+  let best = null, bestWR = -1;
+  let html = '';
+  Object.entries(rates).forEach(([s,v])=>{
+    if(!v.total){ html += `<div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;opacity:.5"><div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${NAMES[s]||s}</div><div style="font-size:11px;color:var(--muted);margin-top:4px">No data yet</div></div>`; return; }
+    const wr = parseFloat(v.win_rate||0);
+    const col = wr>=65?'var(--green)':wr>=55?'var(--amber)':'var(--red)';
+    const bar = Math.min(100,wr);
+    if(wr>bestWR&&v.total>=3){bestWR=wr;best=s;}
+    html += `<div style="background:var(--bg3);border:1px solid ${wr>=60?col:'var(--bdr)'};border-radius:8px;padding:10px 12px;position:relative;overflow:hidden">
+      <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">${NAMES[s]||s}</div>
+      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${col};margin:4px 0">${v.win_rate||'—'}%</div>
+      <div style="font-size:10px;color:var(--muted)">${v.wins}W ${v.losses}L · ${v.total} trades</div>
+      <div style="background:rgba(255,255,255,0.05);border-radius:2px;height:3px;margin-top:8px">
+        <div style="width:${bar}%;height:3px;border-radius:2px;background:${col};transition:width .5s"></div>
+      </div>
+      ${best===s?'<div style="position:absolute;top:6px;right:8px;font-size:9px;font-family:var(--mono);color:var(--green);font-weight:700">★ BEST</div>':''}
+    </div>`;
+  });
+  document.getElementById('ai-strategy-grid').innerHTML = html;
+  if(best){
+    document.getElementById('ai-active-pill').textContent = '★ '+NAMES[best];
+    document.getElementById('ai-active-pill').className = 'pill pg';
+  }
+}
+
 function loadAll(){ loadStatus(); loadTrades(); loadLog(); document.getElementById('refresh-tick').textContent='Last refresh: '+new Date().toLocaleTimeString(); }
 
 loadAll();
