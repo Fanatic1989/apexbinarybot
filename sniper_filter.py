@@ -59,10 +59,12 @@ def sniper_confirm(candles: list, signal: dict) -> dict:
     if passed: score += 1
 
     # ── Confidence grading ────────────────
-    if score >= 3:
+    # Raised thresholds — HIGH needs 4/5, not 3/5
+    # This stops rubber-stamping bad signals as HIGH
+    if score >= 4:
         confidence = "high"
         confirmed  = True
-    elif score >= 1:
+    elif score >= 2:
         confidence = "normal"
         confirmed  = True
     else:
