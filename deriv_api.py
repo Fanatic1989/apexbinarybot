@@ -82,38 +82,69 @@ def get_balance():
             except: pass
 
 def place_trade(symbol, direction, stake, duration_minutes):
+    """
+    Place a binary options trade.
+    For forex pairs, automatically tries multiple durations
+    until one is accepted by Deriv.
+    """
+    # Build list of durations to try
+    if symbol.startswith("frx"):
+        # Try different durations for forex
+        durations_to_try = [(d, "m") for d in [15, 30, 60, 120]]
+    else:
+        durations_to_try = [(duration_minutes, "m")]
+
     ws = None
     try:
         ws = _open_ws()
-        ws.send(json.dumps({
-            "proposal": 1,
-            "amount": round(stake, 2),
-            "basis": "stake",
-            "contract_type": "CALL" if direction == "CALL" else "PUT",
-            "currency": "USD",
-            "duration": duration_minutes,
-            "duration_unit": "m",
-            "symbol": symbol
-        }))
-        proposal = json.loads(ws.recv())
-        if "error" in proposal:
-            log.error(f"[DERIV] Proposal error {symbol}: {proposal['error']['message']}")
-            return {}
-        proposal_id = proposal["proposal"]["id"]
-        payout      = proposal["proposal"]["payout"]
-        ws.send(json.dumps({"buy": proposal_id, "price": round(stake, 2)}))
-        result = json.loads(ws.recv())
-        if "error" in result:
-            log.error(f"[DERIV] Buy error {symbol}: {result['error']['message']}")
-            return {}
-        return {
-            "contract_id":  result["buy"]["contract_id"],
-            "symbol":       symbol,
-            "direction":    direction,
-            "stake":        stake,
-            "payout":       payout,
-            "duration_min": duration_minutes
-        }
+
+        for dur, unit in durations_to_try:
+            ws.send(json.dumps({
+                "proposal": 1,
+                "amount": round(stake, 2),
+                "basis": "stake",
+                "contract_type": "CALL" if direction == "CALL" else "PUT",
+                "currency": "USD",
+                "duration": dur,
+                "duration_unit": unit,
+                "symbol": symbol
+            }))
+            proposal = json.loads(ws.recv())
+
+            if "error" in proposal:
+                err_msg = proposal['error']['message']
+                if "duration" in err_msg.lower() or "trading is not offered" in err_msg.lower():
+                    log.warning(f"[DERIV] {symbol} duration {dur}{unit} not valid, trying next...")
+                    continue
+                log.error(f"[DERIV] Proposal error {symbol}: {err_msg}")
+                return {}
+
+            # Valid proposal found
+            proposal_id  = proposal["proposal"]["id"]
+            payout       = proposal["proposal"]["payout"]
+            actual_dur   = dur
+            log.info(f"[DERIV] Proposal OK {symbol} {direction} "
+                     f"${stake} | {dur}{unit} | payout ${payout:.2f}")
+
+            ws.send(json.dumps({"buy": proposal_id, "price": round(stake, 2)}))
+            result = json.loads(ws.recv())
+
+            if "error" in result:
+                log.error(f"[DERIV] Buy error {symbol}: {result['error']['message']}")
+                return {}
+
+            return {
+                "contract_id":  result["buy"]["contract_id"],
+                "symbol":       symbol,
+                "direction":    direction,
+                "stake":        stake,
+                "payout":       payout,
+                "duration_min": actual_dur
+            }
+
+        log.error(f"[DERIV] No valid duration found for {symbol}")
+        return {}
+
     except Exception as e:
         log.error(f"[DERIV] place_trade exception {symbol}: {e}")
         return {}
