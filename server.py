@@ -268,7 +268,7 @@ def test_forex():
 @login_required
 def test_durations():
     import websocket as _ws, json as _json
-    symbol = "frxEURUSD"
+    symbol = request.args.get("symbol", "frxEURUSD")
     durations = [
         (1,"m"),(2,"m"),(3,"m"),(5,"m"),(10,"m"),(15,"m"),(30,"m"),
         (60,"m"),(1,"h"),(1,"d"),
