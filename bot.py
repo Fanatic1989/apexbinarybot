@@ -1,14 +1,14 @@
-import os
-import json
-import threading
+import time
 import logging
+import json
+import os
 from datetime import datetime
-from functools import wraps
-
-from flask import Flask, jsonify, request, render_template, redirect, url_for, session
 
 import config
-import bot
+from deriv_api import get_candles, get_balance, place_trade, get_contract_result
+from strategy import analyze_market
+from risk_manager import RiskManager
+from telegram_bot import send_signal, send_alert
 
 # ─────────────────────────────────────────
 # Logging
@@ -20,276 +20,394 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────
-# Flask app
-# ─────────────────────────────────────────
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", config.ADMIN_PASSWORD or "apex-secret-key-change-me")
+# Exposed for server.py /status route
+risk_manager = None
+last_signals  = []
 
 # ─────────────────────────────────────────
-# Bot thread state
+# Schedule constants
 # ─────────────────────────────────────────
-bot_thread    = None
-bot_running   = False
-bot_stop_flag = threading.Event()
+# Session 1: 12 hours trading
+# Rest:        1 hour pause
+# Session 2:  11 hours trading
+# Target:     100 trades per 24 hours
+# That means ~4.2 trades per hour = 1 trade every ~14 minutes
+# With 19 markets scanning every 60s we easily hit this
 
-TRADE_HISTORY_FILE = "trade_history.json"
-
-# ─────────────────────────────────────────
-# Login required decorator
-# ─────────────────────────────────────────
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get("logged_in"):
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return decorated
+SESSION_1_HOURS  = 12
+REST_HOURS       = 1
+SESSION_2_HOURS  = 11
+TARGET_TRADES    = 100
+MAX_TRADES_S1    = 55   # ~55 trades in session 1
+MAX_TRADES_S2    = 45   # ~45 trades in session 2
 
 
 # ─────────────────────────────────────────
-# Route: Login
+# Main bot loop
 # ─────────────────────────────────────────
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
+def run_bot():
+    global risk_manager
 
-        if username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
-            session["logged_in"] = True
-            session["username"]  = username
-            log.info(f"[SERVER] Login successful for '{username}'")
-            return redirect(url_for("dashboard"))
-        else:
-            error = "Invalid username or password"
-            log.warning(f"[SERVER] Failed login attempt for '{username}'")
+    log.info("=" * 55)
+    log.info("  APEX BINARY BOT — 24HR SCHEDULE MODE")
+    log.info(f"  Mode      : {config.MODE.upper()}")
+    log.info(f"  Markets   : {len(config.MARKETS)}")
+    log.info(f"  Schedule  : {SESSION_1_HOURS}h trade → {REST_HOURS}h rest → {SESSION_2_HOURS}h trade")
+    log.info(f"  Target    : {TARGET_TRADES} trades/day")
+    log.info("=" * 55)
 
-    return render_template("login.html", error=error)
+    # ── Connect with retry ───────────────
+    balance = 0.0
+    for attempt in range(1, 6):
+        log.info(f"[BOT] Connecting to Deriv (attempt {attempt}/5) | "
+                 f"App ID: {config.DERIV_APP_ID} | Mode: {config.MODE.upper()}")
+        balance = get_balance()
+        if balance > 0:
+            break
+        log.warning("[BOT] Connection failed. Retrying in 10s...")
+        time.sleep(10)
 
+    if balance <= 0:
+        log.error("=" * 55)
+        log.error("  COULD NOT CONNECT TO DERIV AFTER 5 ATTEMPTS")
+        log.error(f"  App ID : {config.DERIV_APP_ID}")
+        log.error(f"  Token  : {'SET' if config.ACTIVE_TOKEN else 'MISSING'}")
+        log.error("  Fix: Update DERIV_APP_ID + DEMO_TOKEN in Render")
+        log.error("=" * 55)
+        return
 
-# ─────────────────────────────────────────
-# Route: Logout
-# ─────────────────────────────────────────
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
+    risk_manager = RiskManager(starting_balance=balance)
+    log.info(f"[BOT] Connected | Balance: ${balance:.2f}")
+    send_alert(f"🚀 Apex Bot started\nMode: {config.MODE.upper()}\nBalance: ${balance:.2f}")
 
-
-# ─────────────────────────────────────────
-# Route: Dashboard
-# ─────────────────────────────────────────
-@app.route("/")
-@login_required
-def dashboard():
-    return render_template("dashboard.html")
-
-
-# ─────────────────────────────────────────
-# Route: Status
-# ─────────────────────────────────────────
-@app.route("/status")
-@login_required
-def status():
-    risk_summary = None
-    if hasattr(bot, "risk_manager") and bot.risk_manager:
-        risk_summary = bot.risk_manager.get_summary()
-    return jsonify({
-        "bot_running":     bot_running,
-        "mode":            config.MODE,
-        "markets":         len(config.MARKETS),
-        "active_markets":  len(config.get_active_markets()),
-        "interval":        config.SCAN_INTERVAL,
-        "session":         config.get_current_session(),
-        "risk":            risk_summary,
-        "last_signals":    getattr(bot, "last_signals", [])
-    })
-
-
-# ─────────────────────────────────────────
-# Route: Start bot
-# ─────────────────────────────────────────
-@app.route("/start")
-@login_required
-def start_bot():
-    global bot_thread, bot_running, bot_stop_flag
-
-    if bot_running and bot_thread and bot_thread.is_alive():
-        return jsonify({"status": "bot already running"})
-
-    bot_stop_flag.clear()
-    bot_running = True
-
-    bot_thread = threading.Thread(target=_run_bot_safe, daemon=True, name="BotThread")
-    bot_thread.start()
-
-    log.info("[SERVER] Bot thread started.")
-    return jsonify({"status": "bot started"})
-
-
-# ─────────────────────────────────────────
-# Route: Stop bot
-# ─────────────────────────────────────────
-@app.route("/stop")
-@login_required
-def stop_bot():
-    global bot_running
-    bot_running = False
-    bot_stop_flag.set()
-    log.info("[SERVER] Bot stop requested.")
-    return jsonify({"status": "bot stopped"})
-
-
-# ─────────────────────────────────────────
-# Route: Switch mode
-# ─────────────────────────────────────────
-@app.route("/mode/<mode>")
-@login_required
-def change_mode(mode):
-    if mode not in ("demo", "live"):
-        return jsonify({"error": "Mode must be 'demo' or 'live'"}), 400
-
-    global bot_running
-    bot_running = False
-    bot_stop_flag.set()
-
-    config.MODE         = mode
-    config.ACTIVE_TOKEN = config.get_active_token()
-
-    log.info(f"[SERVER] Mode switched to {mode.upper()}")
-    return jsonify({
-        "mode":   config.MODE,
-        "status": "bot stopped for mode switch — restart manually"
-    })
-
-
-# ─────────────────────────────────────────
-# Route: Trade history
-# ─────────────────────────────────────────
-@app.route("/trades")
-@login_required
-def trades():
-    try:
-        with open(TRADE_HISTORY_FILE) as f:
-            data = json.load(f)
-        return jsonify(data)
-    except FileNotFoundError:
-        return jsonify({"trades": []})
-    except Exception as e:
-        log.error(f"[SERVER] Error reading trade history: {e}")
-        return jsonify({"trades": [], "error": str(e)})
-
-
-# ─────────────────────────────────────────
-# Route: Log lines
-# ─────────────────────────────────────────
-_log_lines = []
-
-class _LogHandler(logging.Handler):
-    def emit(self, record):
-        _log_lines.append(self.format(record))
-        if len(_log_lines) > 200:
-            _log_lines.pop(0)
-
-_handler = _LogHandler()
-_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
-logging.getLogger().addHandler(_handler)
-
-@app.route("/log")
-@login_required
-def get_log():
-    return jsonify({"lines": list(reversed(_log_lines[-50:]))})
-
-
-# ─────────────────────────────────────────
-# Route: Health check — NO login required
-# Render pings this to keep container alive
-# ─────────────────────────────────────────
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
-
-
-
-# ─────────────────────────────────────────
-# Route: Connection test (debug)
-# ─────────────────────────────────────────
-@app.route("/test-connection")
-@login_required
-def test_connection():
-    """Test Deriv API connection and show exactly what is failing."""
-    import websocket, json
-    results = {
-        "app_id":     config.DERIV_APP_ID,
-        "mode":       config.MODE,
-        "token_set":  bool(config.ACTIVE_TOKEN),
-        "token_preview": config.ACTIVE_TOKEN[:6] + "..." if config.ACTIVE_TOKEN else "NOT SET",
-        "ws_url":     f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-        "auth_result": None,
-        "balance":    None,
-        "error":      None
-    }
-    try:
-        ws = websocket.create_connection(results["ws_url"], timeout=10)
-        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        resp = json.loads(ws.recv())
-        if "error" in resp:
-            results["auth_result"] = "FAILED"
-            results["error"] = resp["error"]["message"]
-        else:
-            results["auth_result"] = "SUCCESS"
-            results["balance"] = resp.get("authorize", {}).get("balance")
-        ws.close()
-    except Exception as e:
-        results["auth_result"] = "EXCEPTION"
-        results["error"] = str(e)
-    return jsonify(results)
-
-# ─────────────────────────────────────────
-# Watchdog — auto restart bot if it crashes
-# ─────────────────────────────────────────
-def _watchdog():
-    """
-    Runs in background. If bot_running=True but
-    thread is dead, restarts the bot automatically.
-    """
-    import time as _time
-    _time.sleep(60)  # initial delay
+    # ── Run 24hr schedule ────────────────
     while True:
-        global bot_thread, bot_running
-        if bot_running and (bot_thread is None or not bot_thread.is_alive()):
-            log.warning("[WATCHDOG] Bot thread died — auto restarting...")
-            bot_thread = threading.Thread(
-                target=_run_bot_safe, daemon=True, name="BotThread"
-            )
-            bot_thread.start()
-            log.info("[WATCHDOG] Bot restarted.")
-        _time.sleep(30)
+        try:
+            _run_session("SESSION 1", MAX_TRADES_S1, SESSION_1_HOURS)
 
-# Start watchdog on import
-_watchdog_thread = threading.Thread(target=_watchdog, daemon=True, name="Watchdog")
-_watchdog_thread.start()
+            log.info(f"[BOT] 💤 REST period — {REST_HOURS} hour(s)")
+            send_alert(f"💤 Rest period started ({REST_HOURS}h)\n"
+                       f"Balance: ${risk_manager.current_balance:.2f}")
+            time.sleep(REST_HOURS * 3600)
+
+            fresh = get_balance()
+            if fresh > 0:
+                risk_manager.current_balance = fresh
+                log.info(f"[BOT] Balance refreshed after rest: ${fresh:.2f}")
+
+            _run_session("SESSION 2", MAX_TRADES_S2, SESSION_2_HOURS)
+
+        except Exception as _e:
+            log.error(f"[BOT] Session error: {_e} — restarting in 60s")
+            time.sleep(60)
+            continue
+
+                # Daily reset
+        log.info("[BOT] 🔄 24hr cycle complete — resetting daily counters")
+        fresh = get_balance()
+        risk_manager.reset_daily(fresh if fresh > 0 else None)
+        send_alert(f"📋 24hr cycle complete\n"
+                   f"Trades: {risk_manager.total_trades}\n"
+                   f"Wins: {risk_manager.total_wins}\n"
+                   f"Losses: {risk_manager.total_losses}\n"
+                   f"Net P&L: ${risk_manager.net_pnl:.2f}\n"
+                   f"Balance: ${risk_manager.current_balance:.2f}")
+
 
 # ─────────────────────────────────────────
-# Bot runner wrapper
+# Trading session
 # ─────────────────────────────────────────
-def _run_bot_safe():
-    global bot_running
+def _run_session(name: str, max_trades: int, max_hours: int):
+    """Run a trading session until trade target or time limit is hit."""
+    log.info(f"[BOT] ▶ {name} started | Target: {max_trades} trades | "
+             f"Max duration: {max_hours}h")
+    send_alert(f"▶ {name} started\nTarget: {max_trades} trades\n"
+               f"Balance: ${risk_manager.current_balance:.2f}")
+
+    session_trades  = 0
+    session_start   = time.time()
+    max_seconds     = max_hours * 3600
+    scan_count      = 0
+
+    while True:
+        elapsed = time.time() - session_start
+
+        # ── Time limit ───────────────────
+        if elapsed >= max_seconds:
+            log.info(f"[BOT] {name} time limit reached ({max_hours}h)")
+            break
+
+        # ── Trade target ─────────────────
+        if session_trades >= max_trades:
+            log.info(f"[BOT] {name} trade target reached ({max_trades} trades)")
+            break
+
+        # ── Daily loss limit ─────────────
+        if risk_manager.daily_loss_limit_hit():
+            msg = f"🛑 Daily loss limit hit. Stopping all sessions."
+            log.warning(msg)
+            send_alert(msg)
+            _sleep_until_midnight()
+            fresh = get_balance()
+            risk_manager.reset_daily(fresh if fresh > 0 else None)
+            break
+
+        # ── Pause check ──────────────────
+        if risk_manager.is_paused():
+            remaining = risk_manager.pause_remaining()
+            log.info(f"[BOT] ⏸ Paused — resuming in {remaining:.0f}s")
+            time.sleep(min(remaining, 30))
+            continue
+
+        # ── Scan markets ─────────────────
+        scan_count += 1
+        remaining_trades = max_trades - session_trades
+        time_left_min    = (max_seconds - elapsed) / 60
+
+        log.info(f"[BOT] {name} Scan #{scan_count} | "
+                 f"Trades: {session_trades}/{max_trades} | "
+                 f"Time left: {time_left_min:.0f}m | "
+                 f"Balance: ${risk_manager.current_balance:.2f}")
+
+        active = config.get_active_markets()
+        for market in active:
+            # Stop mid-scan if target hit
+            if session_trades >= max_trades:
+                break
+
+            try:
+                candles = get_candles(market)
+                if not candles or len(candles) < 30:
+                    continue
+
+                signal = analyze_market(candles, market)
+                # Track last signal per market for dashboard
+                import bot as _b
+                _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
+                if signal:
+                    _b.last_signals.append({
+                        "market": market,
+                        "direction": signal.get("direction","NONE"),
+                        "confidence": signal.get("confidence","low"),
+                        "timestamp": __import__("datetime").datetime.utcnow().strftime("%H:%M:%S")
+                    })
+                    if len(_b.last_signals) > 30:
+                        _b.last_signals = _b.last_signals[-30:]
+
+                if not signal or signal.get("direction") == "NONE":
+                    continue
+                if not signal.get("confirmed", False):
+                    continue
+
+                direction  = signal["direction"]
+                confidence = signal.get("confidence", "normal")
+                expiry     = config.get_expiry(market)
+
+                # ── Compounding stake ─────
+                stake = _calculate_stake()
+
+                log.info(f"[{market}] ⚡ {direction} | "
+                         f"Conf: {confidence} | "
+                         f"Expiry: {expiry}m | "
+                         f"Stake: ${stake:.2f}")
+
+                send_signal(
+                    market=market,
+                    direction=direction,
+                    expiry=expiry,
+                    confidence=confidence,
+                    stake=stake
+                )
+
+                # ── Signal only mode ─────
+                # Set SIGNAL_ONLY=true in Render env to
+                # watch signals without placing real trades
+                if os.getenv("SIGNAL_ONLY","false").lower() == "true":
+                    log.info(f"[{market}] 📡 SIGNAL ONLY — {direction} "
+                             f"(no trade placed)")
+                    session_trades += 1
+                    continue
+
+                # ── Place trade ───────────
+                trade = place_trade(
+                    symbol=market,
+                    direction=direction,
+                    stake=stake,
+                    duration_minutes=expiry
+                )
+
+                if not trade:
+                    log.error(f"[{market}] Trade placement failed")
+                    continue
+
+                session_trades += 1
+                contract_id = trade["contract_id"]
+                log.info(f"[{market}] Trade #{session_trades} placed — "
+                         f"contract #{contract_id}")
+
+                # ── Wait for settlement ───
+                _wait_for_settlement(expiry)
+
+                # ── Get result ────────────
+                outcome = get_contract_result(contract_id)
+                if outcome:
+                    _handle_outcome(market, direction, stake,
+                                    outcome, risk_manager, trade, signal)
+
+            except Exception as e:
+                log.error(f"[{market}] Error: {e}", exc_info=True)
+                continue
+
+        time.sleep(config.SCAN_INTERVAL)
+
+    # ── Session summary ──────────────────
+    log.info(f"[BOT] {name} complete | "
+             f"Trades: {session_trades} | "
+             f"Balance: ${risk_manager.current_balance:.2f}")
+
+
+# ─────────────────────────────────────────
+# Compounding stake calculation
+# ─────────────────────────────────────────
+def _calculate_stake() -> float:
+    """
+    Calculate stake with optional compounding.
+
+    If COMPOUND=true:
+        Stakes grow as balance grows.
+        Uses current_balance * STAKE_PERCENT.
+
+    If COMPOUND=false:
+        Fixed stake based on starting balance.
+        Safer — losses don't shrink future stakes.
+    """
+    if config.COMPOUND:
+        # Compound: stake grows with balance
+        balance = risk_manager.current_balance
+    else:
+        # Fixed: always use starting balance as base
+        balance = risk_manager.starting_balance
+
+    stake = balance * (config.STAKE_PERCENT / 100)
+    stake = max(stake, 0.35)            # Deriv minimum
+    stake = min(stake, balance * 0.02)  # hard cap 2%
+    return round(stake, 2)
+
+
+# ─────────────────────────────────────────
+# Handle trade outcome
+# ─────────────────────────────────────────
+def _handle_outcome(market, direction, stake, outcome,
+                    risk: RiskManager,
+                    trade: dict = None,
+                    signal: dict = None):
+    status      = outcome.get("status", "unknown")
+    profit      = float(outcome.get("profit", 0))
+    confidence  = signal.get("confidence", "normal") if signal else "normal"
+    expiry      = signal.get("expiry", config.get_expiry(market)) if signal else config.get_expiry(market)
+    payout      = trade.get("payout", 0) if trade else 0
+    contract_id = trade.get("contract_id", "—") if trade else "—"
+
+    # Save to history first
+    _save_trade({
+        "contract_id": contract_id,
+        "symbol":      market,
+        "direction":   direction,
+        "stake":       round(stake, 2),
+        "payout":      round(float(payout), 2),
+        "result":      status,
+        "profit":      round(profit if status == "won" else -stake, 2),
+        "expiry":      expiry,
+        "confidence":  confidence,
+    })
+
+    if status == "won":
+        log.info(f"[{market}] ✅ WON +${profit:.2f} | "
+                 f"Balance: ${risk.current_balance + profit:.2f}")
+        risk.record_win(profit)
+        send_alert(f"✅ {market} {direction} WON +${profit:.2f}\n"
+                   f"Balance: ${risk.current_balance:.2f}")
+
+    elif status == "lost":
+        log.info(f"[{market}] ❌ LOST -${stake:.2f} | "
+                 f"Balance: ${risk.current_balance - stake:.2f}")
+        risk.record_loss(stake)
+        send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
+                   f"Balance: ${risk.current_balance:.2f}")
+
+        if risk.consecutive_losses >= config.MAX_CONSECUTIVE_LOSS:
+            risk.trigger_pause()
+            msg = (f"⏸ {config.MAX_CONSECUTIVE_LOSS} losses in a row.\n"
+                   f"Pausing {config.PAUSE_DURATION // 60} minutes.")
+            log.warning(msg)
+            send_alert(msg)
+    else:
+        log.warning(f"[{market}] Unknown result: {status}")
+
+
+# ─────────────────────────────────────────
+# Save trade to history
+# ─────────────────────────────────────────
+def _save_trade(trade: dict):
+    history_file = "trade_history.json"
+    empty = {"trades": [], "total_trades": 0,
+             "total_wins": 0, "total_losses": 0, "net_pnl": 0.0}
     try:
-        bot.run_bot()
+        if os.path.exists(history_file):
+            with open(history_file, "r") as f:
+                data = json.load(f)
+        else:
+            data = empty
+
+        for k, v in empty.items():
+            if k not in data:
+                data[k] = v
+
+        trade["time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        data["trades"].append(trade)
+        data["total_trades"] += 1
+
+        if trade.get("result") == "won":
+            data["total_wins"] += 1
+            data["net_pnl"]     = round(data["net_pnl"] + abs(float(trade.get("profit", 0))), 2)
+        else:
+            data["total_losses"] += 1
+            data["net_pnl"]      = round(data["net_pnl"] - float(trade.get("stake", 0)), 2)
+
+        if len(data["trades"]) > 500:
+            data["trades"] = data["trades"][-500:]
+
+        with open(history_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+        log.info(f"[HISTORY] {trade['symbol']} {trade['direction']} "
+                 f"{trade['result'].upper()} saved.")
     except Exception as e:
-        log.error(f"[SERVER] Bot thread crashed: {e}", exc_info=True)
-    finally:
-        bot_running = False
-        log.info("[SERVER] Bot thread exited.")
+        log.error(f"[HISTORY] Failed to save: {e}")
 
 
 # ─────────────────────────────────────────
-# Entry point
+# Wait for contract settlement
 # ─────────────────────────────────────────
+def _wait_for_settlement(expiry_minutes: int):
+    wait = (expiry_minutes * 60) + 8
+    log.info(f"[BOT] Waiting {wait}s for settlement...")
+    time.sleep(wait)
+
+
+# ─────────────────────────────────────────
+# Sleep until midnight
+# ─────────────────────────────────────────
+def _sleep_until_midnight():
+    from datetime import timedelta
+    now      = datetime.now()
+    midnight = now.replace(hour=0, minute=0, second=5, microsecond=0)
+    if midnight <= now:
+        midnight += timedelta(days=1)
+    seconds = (midnight - now).total_seconds()
+    log.info(f"[BOT] Sleeping {seconds/3600:.1f}h until midnight...")
+    time.sleep(seconds)
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
-    log.info(f"[SERVER] Starting on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    run_bot()
