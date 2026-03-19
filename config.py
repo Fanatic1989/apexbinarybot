@@ -1,403 +1,209 @@
 import os
-import json
-import threading
-import logging
-from datetime import datetime
-from functools import wraps
+from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request, render_template, redirect, url_for, session
+# ─────────────────────────────────────────
+# Deriv Application ID
+# ─────────────────────────────────────────
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")
 
-import config
-import bot
+# ─────────────────────────────────────────
+# Tokens
+# ─────────────────────────────────────────
+DEMO_TOKEN = os.getenv("DEMO_TOKEN", "")
+LIVE_TOKEN = os.getenv("LIVE_TOKEN", "")
+MODE       = os.getenv("MODE", "demo").lower()
+
+def get_active_token():
+    if MODE == "live":
+        if not LIVE_TOKEN:
+            raise ValueError("LIVE_TOKEN not set but MODE=live")
+        return LIVE_TOKEN
+    if not DEMO_TOKEN:
+        raise ValueError("DEMO_TOKEN not set but MODE=demo")
+    return DEMO_TOKEN
+
+ACTIVE_TOKEN = get_active_token()
+
+# ─────────────────────────────────────────
+# Scan & candle settings
+# ─────────────────────────────────────────
+SCAN_INTERVAL      = int(os.getenv("SCAN_INTERVAL", 60))
+CANDLE_GRANULARITY = 60
+CANDLE_COUNT       = 120
+HTF_GRANULARITY    = 3600   # 1-hour candles for trend filter
+HTF_COUNT          = 50
+
+# ─────────────────────────────────────────
+# Synthetic indices — always available
+# ─────────────────────────────────────────
+SYNTHETIC_MARKETS = [
+    "R_50", "R_75", "R_100",
+    "1HZ50V", "1HZ75V", "1HZ100V",
+    "JD50", "JD75", "JD100",
+    "BOOM500", "BOOM1000",
+    "CRASH500", "CRASH1000",
+]
+
+# ─────────────────────────────────────────
+# Forex pairs — session aware
+# Deriv binary options uses frx prefix
+# ─────────────────────────────────────────
+FOREX_MARKETS = [
+    "frxEURUSD",   # Euro / US Dollar        — most liquid
+    "frxGBPUSD",   # British Pound / US Dollar
+    "frxUSDJPY",   # US Dollar / Japanese Yen
+    "frxAUDUSD",   # Australian Dollar / US Dollar
+    "frxUSDCAD",   # US Dollar / Canadian Dollar
+    "frxUSDCHF",   # US Dollar / Swiss Franc
+    "frxEURGBP",   # Euro / British Pound
+    "frxEURJPY",   # Euro / Japanese Yen
+    "frxGBPJPY",   # British Pound / Japanese Yen
+]
+
+# Asian session only pairs
+ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD", "frxEURJPY"]
+
+# ─────────────────────────────────────────
+# Session windows (UTC hours)
+# ─────────────────────────────────────────
+LONDON_OPEN    = 8
+LONDON_CLOSE   = 17
+NY_OPEN        = 13
+NY_CLOSE       = 20
+ASIAN_OPEN     = 0
+ASIAN_CLOSE    = 7
+DEAD_ZONE_START= 20
+DEAD_ZONE_END  = 24
+
+def get_current_session() -> str:
+    """Return current trading session name."""
+    hour = datetime.now(timezone.utc).hour
+    if NY_OPEN <= hour < NY_CLOSE and LONDON_OPEN <= hour < LONDON_CLOSE:
+        return "LONDON_NY_OVERLAP"
+    elif LONDON_OPEN <= hour < LONDON_CLOSE:
+        return "LONDON"
+    elif NY_OPEN <= hour < NY_CLOSE:
+        return "NEW_YORK"
+    elif ASIAN_OPEN <= hour < ASIAN_CLOSE:
+        return "ASIAN"
+    else:
+        return "DEAD_ZONE"
+
+def get_active_markets() -> list:
+    """
+    Return markets to scan based on current session.
+    Forex during market hours, synthetics during off-hours.
+    Forex completely disabled on weekends.
+    """
+    # Weekends — synthetics only, forex closed
+    if is_weekend():
+        return SYNTHETIC_MARKETS
+
+    session = get_current_session()
+    if session in ("LONDON_NY_OVERLAP", "LONDON", "NEW_YORK"):
+        return FOREX_MARKETS + SYNTHETIC_MARKETS
+    elif session == "ASIAN":
+        return ASIAN_FOREX + SYNTHETIC_MARKETS
+    else:
+        # Dead zone — synthetics only
+        return SYNTHETIC_MARKETS
+
+# Combined full market list
+MARKETS = list(dict.fromkeys(FOREX_MARKETS + SYNTHETIC_MARKETS))
+
+# ─────────────────────────────────────────
+# Expiry map (minutes)
+# ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# Expiry settings
+# Deriv forex binary: duration_unit = "m" (minutes)
+# Valid forex durations: 15m, 30m, 60m or use "t" (ticks)
+# Valid synthetic durations: 1m, 2m, 3m, 5m
+# ─────────────────────────────────────────
+EXPIRY_MAP = {
+    # Forex — minimum is 15 minutes for most pairs
+    "frxEURUSD": 15, "frxGBPUSD": 15, "frxUSDJPY": 15,
+    "frxAUDUSD": 15, "frxUSDCAD": 15, "frxUSDCHF": 15,
+    "frxEURGBP": 15, "frxEURJPY": 15, "frxGBPJPY": 15,
+    # Synthetics — short expiry works fine
+    "R_50": 3,   "R_75": 3,   "R_100": 2,
+    "1HZ50V": 1, "1HZ75V": 1, "1HZ100V": 1,
+    "JD50": 1,   "JD75": 1,   "JD100": 1,
+    "BOOM500": 1,  "BOOM1000": 1,
+    "CRASH500": 1, "CRASH1000": 1,
+}
+
+def get_expiry(market: str) -> int:
+    """Return expiry in minutes for a given market."""
+    return EXPIRY_MAP.get(market, 15 if is_forex(market) else 3)
+
+def is_forex(market: str) -> bool:
+    return market.startswith("frx")
+
+def is_weekend() -> bool:
+    """Forex markets closed Saturday and Sunday UTC."""
+    day = datetime.now(timezone.utc).weekday()
+    hour = datetime.now(timezone.utc).hour
+    # Friday after 21:00 UTC to Sunday 21:00 UTC
+    if day == 4 and hour >= 21:  return True  # Friday evening
+    if day == 5:                  return True  # Saturday
+    if day == 6 and hour < 21:   return True  # Sunday until open
+    return False
+
+# ─────────────────────────────────────────
+# Risk management
+# ─────────────────────────────────────────
+STAKE_PERCENT        = float(os.getenv("STAKE_PERCENT", 1.0))
+MAX_DAILY_LOSS_PCT   = float(os.getenv("MAX_DAILY_LOSS_PCT", 10.0))
+MAX_CONSECUTIVE_LOSS = int(os.getenv("MAX_CONSECUTIVE_LOSS", 3))
+DAILY_PROFIT_TARGET  = float(os.getenv("DAILY_PROFIT_TARGET", 5.0))
+PAUSE_DURATION       = int(os.getenv("PAUSE_DURATION", 1800))
+
+# ─────────────────────────────────────────
+# Account settings
+# ─────────────────────────────────────────
+CURRENCY         = os.getenv("CURRENCY", "USD")
+COMPOUND         = os.getenv("COMPOUND", "false").lower() == "true"
+COMPOUND_PERCENT = float(os.getenv("COMPOUND_PERCENT", 50.0))
+
+# ─────────────────────────────────────────
+# Admin / server
+# ─────────────────────────────────────────
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+HOST           = os.getenv("host", "0.0.0.0")
+PORT           = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
+
+# ─────────────────────────────────────────
+# Telegram
+# ─────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ─────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-log = logging.getLogger(__name__)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # ─────────────────────────────────────────
-# Flask app
+# Validation
 # ─────────────────────────────────────────
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", config.ADMIN_PASSWORD or "apex-secret-key-change-me")
+def validate_config():
+    errors = []
+    if not DERIV_APP_ID:
+        errors.append("DERIV_APP_ID not set")
+    if MODE not in ("demo", "live"):
+        errors.append(f"MODE must be demo or live, got {MODE}")
+    if not ACTIVE_TOKEN:
+        errors.append("No active token")
+    if SCAN_INTERVAL < 15:
+        errors.append("SCAN_INTERVAL must be >= 15s")
+    for e in errors:
+        print(f"[CONFIG ERROR] {e}")
+    if errors:
+        raise SystemExit("Fix config errors before starting.")
+    print(f"[CONFIG] OK | Mode: {MODE.upper()} | "
+          f"Markets: {len(MARKETS)} | Interval: {SCAN_INTERVAL}s | "
+          f"Currency: {CURRENCY} | Compound: {COMPOUND}")
 
-# ─────────────────────────────────────────
-# Bot thread state
-# ─────────────────────────────────────────
-bot_thread    = None
-bot_running   = False
-bot_stop_flag = threading.Event()
-
-TRADE_HISTORY_FILE = "trade_history.json"
-
-# ─────────────────────────────────────────
-# Login required decorator
-# ─────────────────────────────────────────
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get("logged_in"):
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return decorated
-
-
-# ─────────────────────────────────────────
-# Route: Login
-# ─────────────────────────────────────────
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
-
-        if username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
-            session["logged_in"] = True
-            session["username"]  = username
-            log.info(f"[SERVER] Login successful for '{username}'")
-            return redirect(url_for("dashboard"))
-        else:
-            error = "Invalid username or password"
-            log.warning(f"[SERVER] Failed login attempt for '{username}'")
-
-    return render_template("login.html", error=error)
-
-
-# ─────────────────────────────────────────
-# Route: Logout
-# ─────────────────────────────────────────
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-
-# ─────────────────────────────────────────
-# Route: Dashboard
-# ─────────────────────────────────────────
-@app.route("/")
-@login_required
-def dashboard():
-    return render_template("dashboard.html")
-
-
-# ─────────────────────────────────────────
-# Route: Status
-# ─────────────────────────────────────────
-@app.route("/status")
-@login_required
-def status():
-    risk_summary = None
-    if hasattr(bot, "risk_manager") and bot.risk_manager:
-        risk_summary = bot.risk_manager.get_summary()
-    staking_info = None
-    if hasattr(bot, "staking_engine") and bot.staking_engine:
-        staking_info = bot.staking_engine.get_info()
-
-    return jsonify({
-        "bot_running":     bot_running,
-        "mode":            config.MODE,
-        "markets":         len(config.MARKETS),
-        "active_markets":  len(config.get_active_markets()),
-        "interval":        config.SCAN_INTERVAL,
-        "session":         config.get_current_session(),
-        "risk":            risk_summary,
-        "staking":         staking_info,
-        "last_signals":    getattr(bot, "last_signals", [])
-    })
-
-
-# ─────────────────────────────────────────
-# Route: Start bot
-# ─────────────────────────────────────────
-@app.route("/start")
-@login_required
-def start_bot():
-    global bot_thread, bot_running, bot_stop_flag
-
-    if bot_running and bot_thread and bot_thread.is_alive():
-        return jsonify({"status": "bot already running"})
-
-    bot_stop_flag.clear()
-    bot_running = True
-
-    bot_thread = threading.Thread(target=_run_bot_safe, daemon=True, name="BotThread")
-    bot_thread.start()
-
-    log.info("[SERVER] Bot thread started.")
-    return jsonify({"status": "bot started"})
-
-
-# ─────────────────────────────────────────
-# Route: Stop bot
-# ─────────────────────────────────────────
-@app.route("/stop")
-@login_required
-def stop_bot():
-    global bot_running
-    bot_running = False
-    bot_stop_flag.set()
-    log.info("[SERVER] Bot stop requested.")
-    return jsonify({"status": "bot stopped"})
-
-
-# ─────────────────────────────────────────
-# Route: Switch mode
-# ─────────────────────────────────────────
-@app.route("/mode/<mode>")
-@login_required
-def change_mode(mode):
-    if mode not in ("demo", "live"):
-        return jsonify({"error": "Mode must be 'demo' or 'live'"}), 400
-
-    global bot_running
-    bot_running = False
-    bot_stop_flag.set()
-
-    config.MODE         = mode
-    config.ACTIVE_TOKEN = config.get_active_token()
-
-    log.info(f"[SERVER] Mode switched to {mode.upper()}")
-    return jsonify({
-        "mode":   config.MODE,
-        "status": "bot stopped for mode switch — restart manually"
-    })
-
-
-# ─────────────────────────────────────────
-# Route: Trade history
-# ─────────────────────────────────────────
-@app.route("/trades")
-@login_required
-def trades():
-    try:
-        with open(TRADE_HISTORY_FILE) as f:
-            data = json.load(f)
-        return jsonify(data)
-    except FileNotFoundError:
-        return jsonify({"trades": []})
-    except Exception as e:
-        log.error(f"[SERVER] Error reading trade history: {e}")
-        return jsonify({"trades": [], "error": str(e)})
-
-
-# ─────────────────────────────────────────
-# Route: Log lines
-# ─────────────────────────────────────────
-_log_lines = []
-
-class _LogHandler(logging.Handler):
-    def emit(self, record):
-        _log_lines.append(self.format(record))
-        if len(_log_lines) > 200:
-            _log_lines.pop(0)
-
-_handler = _LogHandler()
-_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
-logging.getLogger().addHandler(_handler)
-
-@app.route("/log")
-@login_required
-def get_log():
-    return jsonify({"lines": list(reversed(_log_lines[-50:]))})
-
-
-# ─────────────────────────────────────────
-# Route: Test forex symbols
-# ─────────────────────────────────────────
-@app.route("/test-forex")
-@login_required
-def test_forex():
-    import websocket, json
-    results = {}
-    symbols = [
-        "frxEURUSD","frxGBPUSD","frxUSDJPY",
-        "frxGBPJPY","frxEURGBP","frxAUDUSD",
-        "frxEURJPY","frxUSDCAD","frxUSDCHF",
-    ]
-    ws = None
-    try:
-        ws = websocket.create_connection(
-            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            timeout=15
-        )
-        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        auth = json.loads(ws.recv())
-        if "error" in auth:
-            return jsonify({"error": auth["error"]["message"]})
-
-        for sym in symbols:
-            try:
-                ws.send(json.dumps({
-                    "ticks_history": sym,
-                    "adjust_start_time": 1,
-                    "count": 3,
-                    "end": "latest",
-                    "style": "candles",
-                    "granularity": 60
-                }))
-                r = json.loads(ws.recv())
-                if "candles" in r:
-                    results[sym] = "✓ WORKS"
-                elif "error" in r:
-                    results[sym] = f"✗ {r['error']['message']}"
-                else:
-                    results[sym] = "✗ No data"
-            except Exception as e:
-                results[sym] = f"✗ Exception: {e}"
-    except Exception as e:
-        return jsonify({"error": str(e), "results": results})
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
-
-    return jsonify({"results": results})
-
-
-# ─────────────────────────────────────────
-# Route: Test valid durations for forex
-# ─────────────────────────────────────────
-@app.route("/test-durations")
-@login_required
-def test_durations():
-    import websocket as _ws, json as _json
-    symbol = "frxEURUSD"
-    durations = [
-        (1,"m"),(2,"m"),(3,"m"),(5,"m"),(10,"m"),(15,"m"),(30,"m"),
-        (60,"m"),(1,"h"),(1,"d"),
-        (15,"s"),(30,"s"),(60,"s"),(90,"s"),(120,"s"),(300,"s"),
-    ]
-    results = {}
-    ws = None
-    try:
-        ws = _ws.create_connection(
-            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            timeout=15
-        )
-        ws.send(_json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        auth = _json.loads(ws.recv())
-        if "error" in auth:
-            return jsonify({"error": auth["error"]["message"]})
-        for dur, unit in durations:
-            try:
-                ws.send(_json.dumps({
-                    "proposal": 1, "amount": 1, "basis": "stake",
-                    "contract_type": "CALL", "currency": "USD",
-                    "duration": dur, "duration_unit": unit,
-                    "symbol": symbol
-                }))
-                r = _json.loads(ws.recv())
-                key = f"{dur}{unit}"
-                if "proposal" in r:
-                    results[key] = f"✓ payout ${r['proposal']['payout']:.2f}"
-                else:
-                    results[key] = f"✗ {r.get('error',{}).get('message','No data')}"
-            except Exception as e:
-                results[f"{dur}{unit}"] = f"✗ {e}"
-    except Exception as e:
-        return jsonify({"error": str(e)})
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
-    working = {k:v for k,v in results.items() if v.startswith("✓")}
-    return jsonify({"symbol": symbol, "working": working, "all": results})
-
-
-# ─────────────────────────────────────────
-# Route: Health check — NO login required
-# Render pings this to keep container alive
-# ─────────────────────────────────────────
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
-
-
-
-# ─────────────────────────────────────────
-# Route: Connection test (debug)
-# ─────────────────────────────────────────
-@app.route("/test-connection")
-@login_required
-def test_connection():
-    """Test Deriv API connection and show exactly what is failing."""
-    import websocket, json
-    results = {
-        "app_id":     config.DERIV_APP_ID,
-        "mode":       config.MODE,
-        "token_set":  bool(config.ACTIVE_TOKEN),
-        "token_preview": config.ACTIVE_TOKEN[:6] + "..." if config.ACTIVE_TOKEN else "NOT SET",
-        "ws_url":     f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-        "auth_result": None,
-        "balance":    None,
-        "error":      None
-    }
-    try:
-        ws = websocket.create_connection(results["ws_url"], timeout=10)
-        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        resp = json.loads(ws.recv())
-        if "error" in resp:
-            results["auth_result"] = "FAILED"
-            results["error"] = resp["error"]["message"]
-        else:
-            results["auth_result"] = "SUCCESS"
-            results["balance"] = resp.get("authorize", {}).get("balance")
-        ws.close()
-    except Exception as e:
-        results["auth_result"] = "EXCEPTION"
-        results["error"] = str(e)
-    return jsonify(results)
-
-# ─────────────────────────────────────────
-# Watchdog — auto restart bot if it crashes
-# ─────────────────────────────────────────
-def _watchdog():
-    """
-    Runs in background. If bot_running=True but
-    thread is dead, restarts the bot automatically.
-    """
-    import time as _time
-    _time.sleep(60)  # initial delay
-    while True:
-        global bot_thread, bot_running
-        if bot_running and (bot_thread is None or not bot_thread.is_alive()):
-            log.warning("[WATCHDOG] Bot thread died — auto restarting...")
-            bot_thread = threading.Thread(
-                target=_run_bot_safe, daemon=True, name="BotThread"
-            )
-            bot_thread.start()
-            log.info("[WATCHDOG] Bot restarted.")
-        _time.sleep(30)
-
-# Start watchdog on import
-_watchdog_thread = threading.Thread(target=_watchdog, daemon=True, name="Watchdog")
-_watchdog_thread.start()
-
-# ─────────────────────────────────────────
-# Bot runner wrapper
-# ─────────────────────────────────────────
-def _run_bot_safe():
-    global bot_running
-    try:
-        bot.run_bot()
-    except Exception as e:
-        log.error(f"[SERVER] Bot thread crashed: {e}", exc_info=True)
-    finally:
-        bot_running = False
-        log.info("[SERVER] Bot thread exited.")
-
-
-# ─────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
-    log.info(f"[SERVER] Starting on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+validate_config()
