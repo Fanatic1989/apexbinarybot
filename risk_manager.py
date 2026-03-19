@@ -131,12 +131,10 @@ class RiskManager:
         """Return True if daily loss has exceeded MAX_DAILY_LOSS_PCT."""
         if self.daily_start_bal <= 0:
             return False
+        if self.daily_loss <= 0:
+            return False
         loss_pct = (self.daily_loss / self.daily_start_bal) * 100
-        if loss_pct >= config.MAX_DAILY_LOSS_PCT:
-            log.warning(f"[RISK] 🛑 Daily loss limit hit: "
-                        f"-${self.daily_loss:.2f} ({loss_pct:.1f}%)")
-            return True
-        return False
+        return loss_pct >= config.MAX_DAILY_LOSS_PCT
 
     def daily_profit_target_hit(self) -> bool:
         """Return True if daily profit has reached DAILY_PROFIT_TARGET."""
@@ -199,7 +197,7 @@ class RiskManager:
             "daily_profit":   round(self.daily_profit, 2),
             "daily_loss":     round(self.daily_loss, 2),
             "consec_losses":  self.consecutive_losses,
-            "status":         self.status(),
+            "status":         "TRADE" if not self.is_paused() else "PAUSE",
             "session_start":  self.session_start.strftime("%Y-%m-%d %H:%M UTC")
         }
 
