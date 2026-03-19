@@ -87,25 +87,44 @@ def place_trade(symbol, direction, stake, duration_minutes):
     For forex pairs, automatically tries multiple durations
     until one is accepted by Deriv.
     """
-    # Build list of durations to try
+    # Build list of durations to try based on instrument type
     if symbol.startswith("frx"):
-        # Try different durations for forex
+        # Forex: try minutes
         durations_to_try = [(d, "m") for d in [15, 30, 60, 120]]
+    elif any(symbol.startswith(p) for p in ("BOOM","CRASH")):
+        # Boom/Crash: ticks-based contracts work best
+        # Try ticks first, then minutes as fallback
+        durations_to_try = [(5,"t"),(10,"t"),(1,"m"),(2,"m"),(3,"m"),(5,"m")]
+    elif any(symbol.startswith(p) for p in ("JD",)):
+        # Jump indices
+        durations_to_try = [(1,"m"),(2,"m"),(3,"m")]
+    elif symbol.startswith("1HZ"):
+        # Fast tick indices
+        durations_to_try = [(1,"m"),(2,"m"),(3,"m")]
     else:
-        durations_to_try = [(duration_minutes, "m")]
+        # Standard volatility indices R_10 etc
+        durations_to_try = [(duration_minutes,"m"),(2,"m"),(3,"m"),(5,"m")]
 
     ws = None
     try:
         ws = _open_ws()
 
-        # Cap stake for forex — max payout is $100 on Deriv forex binary
-        # Typical payout ratio ~80%, so max stake = 100/1.8 = ~$55
+        # Cap stake to avoid max payout errors
+        # Deriv caps payouts at ~$100-200 depending on instrument
         actual_stake = stake
         if symbol.startswith("frx"):
+            # Forex binary max payout ~$100, typical ratio 1.8x → max stake $50
             actual_stake = min(stake, 50.00)
-            if actual_stake != stake:
-                log.info(f"[DERIV] Forex stake capped: ${stake:.2f} → ${actual_stake:.2f} "
-                         f"(max payout $100)")
+        elif any(symbol.startswith(p) for p in ("BOOM","CRASH")):
+            # Boom/Crash max stake ~$50 for safe payout
+            actual_stake = min(stake, 50.00)
+        else:
+            # Synthetics — allow up to $100 stake
+            actual_stake = min(stake, 100.00)
+
+        if actual_stake != stake:
+            log.info(f"[DERIV] Stake capped: ${stake:.2f} → ${actual_stake:.2f} "
+                     f"for {symbol}")
 
         for dur, unit in durations_to_try:
             ws.send(json.dumps({
