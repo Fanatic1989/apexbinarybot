@@ -143,11 +143,7 @@ class RiskManager:
         if self.daily_start_bal <= 0:
             return False
         profit_pct = (self.daily_profit / self.daily_start_bal) * 100
-        if profit_pct >= config.DAILY_PROFIT_TARGET:
-            log.info(f"[RISK] 🎯 Daily profit target hit: "
-                     f"+${self.daily_profit:.2f} ({profit_pct:.1f}%)")
-            return True
-        return False
+        return profit_pct >= config.DAILY_PROFIT_TARGET
 
     # ─────────────────────────────────────────
     # Status check (replaces old check_risk())
