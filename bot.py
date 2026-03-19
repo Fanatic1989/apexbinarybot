@@ -248,16 +248,17 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                          f"contract #{contract_id}")
 
                 # ── Wait for settlement ───
-                _wait_for_settlement(expiry)
+                _wait_for_settlement(expiry, market)
 
                 # ── Get result with retry ──
                 outcome = None
-                for _attempt in range(5):
+                for _attempt in range(10):
                     outcome = get_contract_result(contract_id)
                     if outcome and outcome.get("status") in ("won","lost"):
                         break
-                    log.info(f"[{market}] Contract #{contract_id} still open, waiting 5s...")
-                    time.sleep(5)
+                    log.info(f"[{market}] Contract #{contract_id} still open, "
+                             f"retry {_attempt+1}/10 in 8s...")
+                    time.sleep(8)
 
                 if outcome and outcome.get("status") in ("won","lost"):
                     _handle_outcome(market, direction, stake,
@@ -414,9 +415,11 @@ def _save_trade(trade: dict):
 # ─────────────────────────────────────────
 # Wait for contract settlement
 # ─────────────────────────────────────────
-def _wait_for_settlement(expiry_minutes: int):
-    wait = (expiry_minutes * 60) + 8
-    log.info(f"[BOT] Waiting {wait}s for settlement...")
+def _wait_for_settlement(expiry_minutes: int, market: str = ""):
+    # 1HZ markets tick every second — add extra buffer
+    extra = 15 if "HZ" in market else 8
+    wait  = (expiry_minutes * 60) + extra
+    log.info(f"[BOT] Waiting {wait}s for settlement ({market})...")
     time.sleep(wait)
 
 
