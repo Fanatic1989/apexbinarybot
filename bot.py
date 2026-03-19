@@ -26,6 +26,12 @@ risk_manager   = None
 last_signals   = []
 staking_engine = None
 
+# Per-market consecutive loss tracker
+# If a market loses 2 in a row, pause it for 20 minutes
+_market_losses  = {}   # {symbol: consecutive_loss_count}
+_market_paused  = {}   # {symbol: resume_timestamp}
+_MARKET_PAUSE_S = 1200 # 20 minutes
+
 # ─────────────────────────────────────────
 # Schedule constants
 # ─────────────────────────────────────────
@@ -208,6 +214,15 @@ def _run_session(name: str, max_trades: int, max_hours: int):
                 if not signal.get("confirmed", False):
                     log.info(f"[{market}] {signal.get('direction')} signal score "
                              f"{signal.get('score',0)}/5 — not confirmed, skip")
+                    continue
+
+                # ── Market cooldown check ──────
+                import bot as _bm
+                import time as _tm
+                paused_until = _bm._market_paused.get(market, 0)
+                if _tm.time() < paused_until:
+                    mins_left = (paused_until - _tm.time()) / 60
+                    log.info(f"[{market}] On cooldown — {mins_left:.0f}m remaining. Skip.")
                     continue
 
                 direction  = signal["direction"]
@@ -399,6 +414,9 @@ def _handle_outcome(market, direction, stake, outcome,
         "confidence":  confidence,
     })
 
+    import bot as _bm
+    import time as _tm
+
     if status == "won":
         log.info(f"[{market}] ✅ WON +${profit:.2f} | "
                  f"Balance: ${risk.current_balance + profit:.2f}")
@@ -406,6 +424,8 @@ def _handle_outcome(market, direction, stake, outcome,
         if staking_engine: staking_engine.record_win(profit)
         send_alert(f"✅ {market} {direction} WON +${profit:.2f}\n"
                    f"Balance: ${risk.current_balance:.2f}")
+        # Reset market loss counter on win
+        _bm._market_losses[market] = 0
 
     elif status == "lost":
         log.info(f"[{market}] ❌ LOST -${stake:.2f} | "
@@ -414,6 +434,14 @@ def _handle_outcome(market, direction, stake, outcome,
         if staking_engine: staking_engine.record_loss(stake)
         send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
                    f"Balance: ${risk.current_balance:.2f}")
+
+        # Track per-market losses
+        _bm._market_losses[market] = _bm._market_losses.get(market, 0) + 1
+        if _bm._market_losses[market] >= 2:
+            resume = _tm.time() + _bm._MARKET_PAUSE_S
+            _bm._market_paused[market] = resume
+            _bm._market_losses[market] = 0
+            log.warning(f"[{market}] 2 consecutive losses — cooling down 20 min")
 
         if risk.consecutive_losses >= config.MAX_CONSECUTIVE_LOSS:
             risk.trigger_pause()
