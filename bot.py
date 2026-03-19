@@ -83,26 +83,26 @@ def run_bot():
     # ── Run 24hr schedule ────────────────
     while True:
         try:
-          _run_session("SESSION 1", MAX_TRADES_S1, SESSION_1_HOURS)
+            _run_session("SESSION 1", MAX_TRADES_S1, SESSION_1_HOURS)
 
-        log.info(f"[BOT] 💤 REST period — {REST_HOURS} hour(s)")
-        send_alert(f"💤 Rest period started ({REST_HOURS}h)\n"
-                   f"Balance: ${risk_manager.current_balance:.2f}")
-        time.sleep(REST_HOURS * 3600)
+            log.info(f"[BOT] 💤 REST period — {REST_HOURS} hour(s)")
+            send_alert(f"💤 Rest period started ({REST_HOURS}h)\n"
+                       f"Balance: ${risk_manager.current_balance:.2f}")
+            time.sleep(REST_HOURS * 3600)
 
-        # Refresh balance after rest
-        fresh = get_balance()
-        if fresh > 0:
-            risk_manager.current_balance = fresh
-            log.info(f"[BOT] Balance refreshed after rest: ${fresh:.2f}")
+            fresh = get_balance()
+            if fresh > 0:
+                risk_manager.current_balance = fresh
+                log.info(f"[BOT] Balance refreshed after rest: ${fresh:.2f}")
 
-          _run_session("SESSION 2", MAX_TRADES_S2, SESSION_2_HOURS)
+            _run_session("SESSION 2", MAX_TRADES_S2, SESSION_2_HOURS)
+
         except Exception as _e:
             log.error(f"[BOT] Session error: {_e} — restarting in 60s")
             time.sleep(60)
             continue
 
-        # Daily reset
+                # Daily reset
         log.info("[BOT] 🔄 24hr cycle complete — resetting daily counters")
         fresh = get_balance()
         risk_manager.reset_daily(fresh if fresh > 0 else None)
