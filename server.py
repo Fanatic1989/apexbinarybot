@@ -209,6 +209,59 @@ def get_log():
 
 
 # ─────────────────────────────────────────
+# Route: Test forex symbols
+# ─────────────────────────────────────────
+@app.route("/test-forex")
+@login_required
+def test_forex():
+    import websocket, json
+    results = {}
+    symbols = [
+        "frxEURUSD","frxGBPUSD","frxUSDJPY",
+        "frxGBPJPY","frxEURGBP","frxAUDUSD",
+        "frxEURJPY","frxUSDCAD","frxUSDCHF",
+    ]
+    ws = None
+    try:
+        ws = websocket.create_connection(
+            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
+            timeout=15
+        )
+        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
+        auth = json.loads(ws.recv())
+        if "error" in auth:
+            return jsonify({"error": auth["error"]["message"]})
+
+        for sym in symbols:
+            try:
+                ws.send(json.dumps({
+                    "ticks_history": sym,
+                    "adjust_start_time": 1,
+                    "count": 3,
+                    "end": "latest",
+                    "style": "candles",
+                    "granularity": 60
+                }))
+                r = json.loads(ws.recv())
+                if "candles" in r:
+                    results[sym] = "✓ WORKS"
+                elif "error" in r:
+                    results[sym] = f"✗ {r['error']['message']}"
+                else:
+                    results[sym] = "✗ No data"
+            except Exception as e:
+                results[sym] = f"✗ Exception: {e}"
+    except Exception as e:
+        return jsonify({"error": str(e), "results": results})
+    finally:
+        if ws:
+            try: ws.close()
+            except: pass
+
+    return jsonify({"results": results})
+
+
+# ─────────────────────────────────────────
 # Route: Health check — NO login required
 # Render pings this to keep container alive
 # ─────────────────────────────────────────
