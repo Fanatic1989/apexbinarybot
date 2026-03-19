@@ -46,18 +46,21 @@ SYNTHETIC_MARKETS = [
 
 # ─────────────────────────────────────────
 # Forex pairs — session aware
+# Deriv binary options uses frx prefix
 # ─────────────────────────────────────────
 FOREX_MARKETS = [
-    "frxEURUSD",
-    "frxGBPUSD",
-    "frxUSDJPY",
-    "frxGBPJPY",
-    "frxEURGBP",
-    "frxAUDUSD",
+    "frxEURUSD",   # Euro / US Dollar
+    "frxGBPUSD",   # British Pound / US Dollar
+    "frxUSDJPY",   # US Dollar / Japanese Yen
+    "frxAUDUSD",   # Australian Dollar / US Dollar
+    "frxUSDCAD",   # US Dollar / Canadian Dollar
+    "frxUSDCHF",   # US Dollar / Swiss Franc
+    "frxEURGBP",   # Euro / British Pound
+    "frxEURJPY",   # Euro / Japanese Yen
 ]
 
-# Asian session only pairs
-ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY"]
+# Asian session only pairs (most liquid during Asian hours)
+ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD"]
 
 # ─────────────────────────────────────────
 # Session windows (UTC hours)
@@ -89,7 +92,12 @@ def get_active_markets() -> list:
     """
     Return markets to scan based on current session.
     Forex during market hours, synthetics during off-hours.
+    Forex completely disabled on weekends.
     """
+    # Weekends — synthetics only, forex closed
+    if is_weekend():
+        return SYNTHETIC_MARKETS
+
     session = get_current_session()
     if session in ("LONDON_NY_OVERLAP", "LONDON", "NEW_YORK"):
         return FOREX_MARKETS + SYNTHETIC_MARKETS
@@ -122,6 +130,16 @@ def get_expiry(market: str) -> int:
 
 def is_forex(market: str) -> bool:
     return market.startswith("frx")
+
+def is_weekend() -> bool:
+    """Forex markets closed Saturday and Sunday UTC."""
+    day = datetime.now(timezone.utc).weekday()
+    hour = datetime.now(timezone.utc).hour
+    # Friday after 21:00 UTC to Sunday 21:00 UTC
+    if day == 4 and hour >= 21:  return True  # Friday evening
+    if day == 5:                  return True  # Saturday
+    if day == 6 and hour < 21:   return True  # Sunday until open
+    return False
 
 # ─────────────────────────────────────────
 # Risk management
