@@ -98,10 +98,19 @@ def place_trade(symbol, direction, stake, duration_minutes):
     try:
         ws = _open_ws()
 
+        # Cap stake for forex — max payout is $100 on Deriv forex binary
+        # Typical payout ratio ~80%, so max stake = 100/1.8 = ~$55
+        actual_stake = stake
+        if symbol.startswith("frx"):
+            actual_stake = min(stake, 50.00)
+            if actual_stake != stake:
+                log.info(f"[DERIV] Forex stake capped: ${stake:.2f} → ${actual_stake:.2f} "
+                         f"(max payout $100)")
+
         for dur, unit in durations_to_try:
             ws.send(json.dumps({
                 "proposal": 1,
-                "amount": round(stake, 2),
+                "amount": round(actual_stake, 2),
                 "basis": "stake",
                 "contract_type": "CALL" if direction == "CALL" else "PUT",
                 "currency": "USD",
@@ -116,8 +125,28 @@ def place_trade(symbol, direction, stake, duration_minutes):
                 if "duration" in err_msg.lower() or "trading is not offered" in err_msg.lower():
                     log.warning(f"[DERIV] {symbol} duration {dur}{unit} not valid, trying next...")
                     continue
-                log.error(f"[DERIV] Proposal error {symbol}: {err_msg}")
-                return {}
+                if "payout" in err_msg.lower() or "maximum payout" in err_msg.lower():
+                    # Reduce stake further and retry same duration
+                    actual_stake = round(actual_stake * 0.7, 2)
+                    actual_stake = max(actual_stake, 0.50)
+                    log.warning(f"[DERIV] Payout too high, reducing stake to ${actual_stake:.2f}")
+                    ws.send(json.dumps({
+                        "proposal": 1,
+                        "amount": actual_stake,
+                        "basis": "stake",
+                        "contract_type": "CALL" if direction == "CALL" else "PUT",
+                        "currency": "USD",
+                        "duration": dur,
+                        "duration_unit": unit,
+                        "symbol": symbol
+                    }))
+                    proposal = json.loads(ws.recv())
+                    if "error" in proposal:
+                        log.error(f"[DERIV] Still failing after stake reduction: {proposal['error']['message']}")
+                        return {}
+                else:
+                    log.error(f"[DERIV] Proposal error {symbol}: {err_msg}")
+                    return {}
 
             # Valid proposal found
             proposal_id  = proposal["proposal"]["id"]
@@ -137,7 +166,7 @@ def place_trade(symbol, direction, stake, duration_minutes):
                 "contract_id":  result["buy"]["contract_id"],
                 "symbol":       symbol,
                 "direction":    direction,
-                "stake":        stake,
+                "stake":        actual_stake,
                 "payout":       payout,
                 "duration_min": actual_dur
             }
