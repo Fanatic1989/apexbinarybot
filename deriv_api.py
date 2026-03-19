@@ -54,7 +54,7 @@ def get_candles(symbol, count=None, granularity=None, retries=3):
                 except: pass
     return []
 
-def get_htf_candles(symbol, retries=3):
+def get_htf_candles(symbol, retries=2):
     """Fetch 1-hour candles for higher timeframe trend filter."""
     return get_candles(
         symbol,
