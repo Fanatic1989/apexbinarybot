@@ -88,7 +88,10 @@ def place_trade(symbol, direction, stake, duration_minutes):
     until one is accepted by Deriv.
     """
     # Build list of durations to try based on instrument type
-    if symbol.startswith("frx"):
+    if symbol in ("frxXAUUSD", "frxXAGUSD"):
+        # Gold/Silver — same as forex
+        durations_to_try = [(d, "m") for d in [15, 30, 60, 120]]
+    elif symbol.startswith("frx"):
         # Forex: try minutes
         durations_to_try = [(d, "m") for d in [15, 30, 60, 120]]
     elif any(symbol.startswith(p) for p in ("BOOM","CRASH")):
@@ -112,7 +115,10 @@ def place_trade(symbol, direction, stake, duration_minutes):
         # Cap stake to avoid max payout errors
         # Deriv caps payouts at ~$100-200 depending on instrument
         actual_stake = stake
-        if symbol.startswith("frx"):
+        if symbol in ("frxXAUUSD", "frxXAGUSD"):
+            # Gold/Silver — same cap as forex
+            actual_stake = min(stake, 50.00)
+        elif symbol.startswith("frx"):
             # Forex binary max payout ~$100, typical ratio 1.8x → max stake $50
             actual_stake = min(stake, 50.00)
         elif any(symbol.startswith(p) for p in ("BOOM","CRASH")):
