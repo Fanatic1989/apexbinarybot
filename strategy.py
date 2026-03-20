@@ -172,8 +172,29 @@ def _forex_regime(df, candles, market):
 # Thompson Sampling selects best strategy per synthetic
 # ─────────────────────────────────────────
 def _synthetic_regime(df, candles, market):
-    # AI selects which synthetic strategy to use
+    # Detect market regime first
+    regime = _detect_regime(df)
+    log.debug(f"[SYNTH] {market} regime: {regime}")
+
+    # Choppy market — skip entirely
+    if regime == "choppy":
+        log.debug(f"[SYNTH] {market} choppy market — skip")
+        return _no_signal(market)
+
+    # AI selects strategy, but regime overrides selection
     chosen = selector.select_strategy(candles, market)
+
+    # Regime-based strategy override
+    if regime == "ranging":
+        # Ranging: BB bounce and RSI reversal work best
+        if chosen not in ("bb_bounce", "rsi_reversal", "false_breakout"):
+            chosen = "bb_bounce"
+    elif regime in ("trending", "breakout"):
+        # Trending/breakout: momentum and EMA work best
+        if chosen not in ("momentum_streak", "ema_triple", "false_breakout"):
+            chosen = "momentum_streak"
+
+    log.info(f"[AI] {market} regime:{regime} strategy:{chosen}")
 
     if chosen in ("rsi_reversal", "bb_bounce"):
         result = _synth_bb_scalp(df, candles, market)
@@ -401,6 +422,48 @@ def _commodity_regime(df, candles, market):
             return signal
 
     return _no_signal(market)
+
+
+# ─────────────────────────────────────────
+# Market Regime Detection
+# ─────────────────────────────────────────
+def _detect_regime(df) -> str:
+    """
+    Detect current market regime:
+    - 'trending'  : ADX > 25, clear directional move
+    - 'ranging'   : ADX < 20, price oscillating in range
+    - 'choppy'    : ADX 20-25 + high volatility, avoid trading
+    - 'breakout'  : volatility expanding from squeeze
+
+    Returns: 'trending', 'ranging', 'choppy', 'breakout'
+    """
+    try:
+        adx = _adx(df)
+        close = df["close"]
+
+        # Bollinger Band width (volatility measure)
+        mid   = close.rolling(20).mean()
+        std   = close.rolling(20).std()
+        upper = mid + 2*std
+        lower = mid - 2*std
+        bw_now = float((upper - lower).iloc[-1] / mid.iloc[-1])
+        bw_avg = float(((upper - lower) / mid).rolling(20).mean().iloc[-1])
+
+        # Breakout: bands expanding from squeeze
+        squeeze = bw_now < bw_avg * 0.7
+        expanding = bw_now > bw_avg * 1.3
+
+        if expanding and adx > 22:
+            return "breakout"
+        if adx > 25:
+            return "trending"
+        if adx < 20:
+            return "ranging"
+        return "choppy"  # ADX 20-25 — avoid
+
+    except Exception as e:
+        log.debug(f"[REGIME] Detection error: {e}")
+        return "ranging"
 
 
 # ─────────────────────────────────────────
