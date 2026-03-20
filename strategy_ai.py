@@ -134,7 +134,7 @@ class AIStrategySelector:
             return proven
 
         # Layer 2: Thompson Sampling across global strategy performance
-        ts_choice = self._thompson_sampling()
+        ts_choice = self._thompson_sampling(market)
 
         # Layer 3: Condition-based override
         condition_choice = self._condition_based(candles, market)
@@ -156,33 +156,51 @@ class AIStrategySelector:
         self._cache[market] = (choice, time.time())
         return choice
 
-    def _thompson_sampling(self) -> str:
+    def _thompson_sampling(self, market: str = "") -> str:
         """
-        Thompson Sampling with a minimum performance floor.
+        Thompson Sampling with performance floor and market-specific weights.
 
-        If a strategy has 3+ trades and win rate below 45%,
-        it gets excluded from selection until it proves itself.
-        This prevents the AI from repeatedly picking losers.
+        For fast synthetic indices (R_100, JD100):
+          - Boost bb_bounce and rsi_reversal (mean reversion works best)
+          - Reduce ema_triple weight (trends are too short-lived)
+
+        For forex/commodities:
+          - Boost pivot_stochrsi and fvg_retest
+          - Standard sampling for others
         """
         import random
         scores = {}
+        is_fast = market in ("R_100", "JD100", "1HZ100V")
+        is_forex_comm = market.startswith("frx")
+
         for name, stats in self.tracker.data["strategies"].items():
             w = stats["wins"] + 1
             l = stats["losses"] + 1
             total = stats["wins"] + stats["losses"]
             wr    = stats["wins"] / total if total > 0 else 0.5
 
-            # Exclude strategies with proven poor performance
-            if total >= 4 and wr < 0.45:
-                log.debug(f"[AI] {name} excluded — {wr:.0%} WR after {total} trades")
+            # Exclude proven losers
+            if total >= 4 and wr < 0.42:
+                log.debug(f"[AI] {name} excluded — {wr:.0%} WR")
                 scores[name] = 0.0
                 continue
 
-            scores[name] = random.betavariate(w, l)
+            score = random.betavariate(w, l)
 
-        # If all excluded, reset and pick randomly
-        if max(scores.values()) == 0:
-            log.warning("[AI] All strategies underperforming — resetting selection")
+            # Fast index boost: favour mean reversion
+            if is_fast and name in ("bb_bounce", "rsi_reversal"):
+                score *= 1.4
+            if is_fast and name == "ema_triple":
+                score *= 0.4   # penalise on fast indices
+
+            # Forex/commodity boost: favour regime-specific strategies
+            if is_forex_comm and name in ("pivot_stochrsi", "fvg_retest"):
+                score *= 1.5
+
+            scores[name] = score
+
+        if not scores or max(scores.values()) == 0:
+            log.warning("[AI] All strategies underperforming — resetting")
             return random.choice(self.tracker.STRATEGIES)
 
         return max(scores, key=scores.get)
