@@ -22,13 +22,18 @@ from xml.etree import ElementTree
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────
-# Cache — refresh calendar every 4 hours
+# Module-level cache — shared across all calls
+# Only fetches once per 4 hours regardless of
+# how many markets are scanning simultaneously
 # ─────────────────────────────────────────
-_news_cache     = []        # list of news events
+_news_cache     = []
 _cache_ts       = 0
-_CACHE_TTL      = 14400     # 4 hours
-_BLOCK_BEFORE   = 15 * 60  # 15 min before news
-_BLOCK_AFTER    = 15 * 60  # 15 min after news
+_fetch_lock     = None   # set on first use
+_CACHE_TTL      = 14400  # 4 hours
+_RETRY_AFTER    = 3600   # if fetch fails, retry after 1 hour not every scan
+_last_fail_ts   = 0
+_BLOCK_BEFORE   = 15 * 60
+_BLOCK_AFTER    = 15 * 60
 
 # Currency to market mapping
 CURRENCY_MARKETS = {
@@ -116,34 +121,74 @@ class NewsFilter:
         return False, ""
 
     def _get_events(self) -> list:
-        """Get economic calendar events. Cached for 4 hours."""
+        """
+        Get economic calendar events.
+        Uses module-level cache shared across all instances.
+        Only one HTTP fetch per 4 hours regardless of how many
+        markets are scanning simultaneously.
+        """
+        global _news_cache, _cache_ts, _last_fail_ts, _fetch_lock
+        import threading
+
         now = time.time()
-        if self._cache and (now - self._cache_ts) < _CACHE_TTL:
-            return self._cache
 
-        events = self._fetch_forexfactory()
-        if events:
-            self._cache    = events
-            self._cache_ts = now
-            log.info(f"[NEWS] Calendar updated — {len(events)} events loaded")
-        elif not self._cache:
-            # First fetch failed — try backup method
-            events = self._fetch_backup()
+        # Return cached data if still fresh
+        if _news_cache and (now - _cache_ts) < _CACHE_TTL:
+            return _news_cache
+
+        # Don't retry too soon after a failure (wait 1 hour)
+        if not _news_cache and (now - _last_fail_ts) < _RETRY_AFTER:
+            return _news_cache
+
+        # Thread lock — only ONE thread fetches at a time
+        if _fetch_lock is None:
+            _fetch_lock = threading.Lock()
+
+        if not _fetch_lock.acquire(blocking=False):
+            # Another thread is already fetching — return existing cache
+            return _news_cache
+
+        try:
+            events = self._fetch_forexfactory()
             if events:
-                self._cache    = events
-                self._cache_ts = now
+                _news_cache = events
+                _cache_ts   = now
+                log.info(f"[NEWS] Calendar updated — {len(events)} events loaded")
+                # Save to disk for persistence across restarts
+                self._save_cache(events)
+            else:
+                _last_fail_ts = now
+                # Try loading from disk first
+                disk = self._load_cache()
+                if disk:
+                    _news_cache = disk
+                    _cache_ts   = now
+                    log.info(f"[NEWS] Loaded {len(disk)} events from disk cache")
+                elif not _news_cache:
+                    backup = self._fetch_backup()
+                    if backup:
+                        _news_cache = backup
+                        _cache_ts   = now
+        finally:
+            _fetch_lock.release()
 
-        return self._cache
+        return _news_cache
 
     def _fetch_forexfactory(self) -> list:
-        """Fetch ForexFactory RSS calendar."""
+        """Fetch economic calendar from public JSON source."""
         try:
+            # Use the investing.com calendar API as primary source
+            # Falls back to ForexFactory if needed
             url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "Mozilla/5.0 ApexBot/1.0"}
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; ApexBot/1.0)",
+                    "Accept":     "application/json",
+                    "Cache-Control": "no-cache"
+                }
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
 
             events = []
@@ -182,6 +227,37 @@ class NewsFilter:
 
         except Exception as e:
             log.warning(f"[NEWS] ForexFactory fetch failed: {e}")
+            return []
+
+    def _save_cache(self, events: list):
+        """Save calendar to disk so it survives restarts."""
+        try:
+            cache_data = [
+                {**e, "time": e["time"].isoformat()}
+                for e in events if e.get("time")
+            ]
+            with open("news_cache.json", "w") as f:
+                json.dump({"ts": time.time(), "events": cache_data}, f)
+        except Exception as e:
+            log.debug(f"[NEWS] Cache save failed: {e}")
+
+    def _load_cache(self) -> list:
+        """Load calendar from disk if fresh enough."""
+        try:
+            with open("news_cache.json") as f:
+                data = json.load(f)
+            # Only use if less than 12 hours old
+            if time.time() - data.get("ts", 0) > 43200:
+                return []
+            events = []
+            for e in data.get("events", []):
+                try:
+                    e["time"] = datetime.fromisoformat(e["time"])
+                    events.append(e)
+                except:
+                    continue
+            return events
+        except:
             return []
 
     def _fetch_backup(self) -> list:
