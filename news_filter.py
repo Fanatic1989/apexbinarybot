@@ -177,19 +177,27 @@ class NewsFilter:
     def _fetch_forexfactory(self) -> list:
         """Fetch economic calendar from public JSON source."""
         try:
-            # Use the investing.com calendar API as primary source
-            # Falls back to ForexFactory if needed
+            # Primary: nfs.faireconomy.media (ForexFactory public feed)
             url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; ApexBot/1.0)",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept":     "application/json",
-                    "Cache-Control": "no-cache"
                 }
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
+
+            # Also try next week's calendar
+            try:
+                url2 = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+                req2 = urllib.request.Request(url2, headers={"User-Agent":"Mozilla/5.0"})
+                with urllib.request.urlopen(req2, timeout=5) as r2:
+                    data2 = json.loads(r2.read().decode())
+                    data = data + data2
+            except:
+                pass
 
             events = []
             for item in data:
