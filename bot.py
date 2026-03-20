@@ -12,6 +12,7 @@ from strategy import analyze_market, record_trade_outcome
 from risk_manager import RiskManager
 from staking import StakingEngine
 from telegram_bot import send_signal, send_alert
+from news_filter import news_filter
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
