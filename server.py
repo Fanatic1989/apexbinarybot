@@ -117,7 +117,8 @@ def status():
         "risk":            risk_summary,
         "staking":         staking_info,
         "last_signals":    getattr(bot, "last_signals", []),
-        "ai_strategy":     ai_info
+        "ai_strategy":     ai_info,
+        "risk_pct":        int(config.STAKE_PERCENT)
     })
 
 
@@ -175,6 +176,37 @@ def change_mode(mode):
     return jsonify({
         "mode":   config.MODE,
         "status": "bot stopped for mode switch — restart manually"
+    })
+
+
+# ─────────────────────────────────────────
+# Route: Set risk percentage
+# ─────────────────────────────────────────
+@app.route("/set-risk/<int:pct>")
+@login_required
+def set_risk(pct):
+    if pct not in (1, 2, 3):
+        return jsonify({"error": "Risk must be 1, 2 or 3"}), 400
+
+    config.STAKE_PERCENT = float(pct)
+
+    # Update staking engine immediately if bot is running
+    balance = 0.0
+    if hasattr(bot, "risk_manager") and bot.risk_manager:
+        balance = bot.risk_manager.current_balance
+
+    if hasattr(bot, "staking_engine") and bot.staking_engine:
+        new_stake = max(balance * (pct/100), 0.35) if balance > 0 else 0.35
+        bot.staking_engine.base_stake    = round(new_stake, 2)
+        bot.staking_engine.current_stake = round(new_stake, 2)
+
+    log.info(f"[SERVER] Risk set to {pct}% | "
+             f"Stake: ${balance*(pct/100):.2f} per trade")
+
+    return jsonify({
+        "risk_pct": pct,
+        "stake":    round(balance*(pct/100), 2) if balance > 0 else 0,
+        "balance":  round(balance, 2)
     })
 
 
