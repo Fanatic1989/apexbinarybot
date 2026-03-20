@@ -118,8 +118,16 @@ def status():
         "staking":         staking_info,
         "last_signals":    getattr(bot, "last_signals", []),
         "ai_strategy":     ai_info,
-        "risk_pct":        int(config.STAKE_PERCENT)
+        "risk_pct":        int(config.STAKE_PERCENT),
+        "news_events":     _get_upcoming_news()
     })
+
+def _get_upcoming_news():
+    try:
+        from news_filter import news_filter
+        return news_filter.get_upcoming_events(hours=4)
+    except:
+        return []
 
 
 # ─────────────────────────────────────────
