@@ -327,6 +327,8 @@ def _synth_momentum(df, candles, market):
     log.info(f"[MOM] {market} | RSI={rsi_val:.1f} ADX={adx_val:.1f} "
              f"EMA9={e9:.4f} EMA21={e21:.4f}")
 
+    # ADX > 18 means some trend — good for momentum
+    # Synthetics running ADX 30-50 which is strongly trending
     if adx_val < 18:
         log.info(f"[MOM] {market} ADX {adx_val:.1f} < 18 — skip")
         return _no_signal(market)
@@ -339,12 +341,13 @@ def _synth_momentum(df, candles, market):
     upper, lower, mid = bb
     bb_pct = (float(close.iloc[-1])-float(lower.iloc[-1])) / (float(upper.iloc[-1])-float(lower.iloc[-1]))
 
-    if bull(-1) and bull(-2) and bull(-3) and e9>e21 and 48<=rsi_val<=66 and 0.45<=bb_pct<=0.80:
-        log.info(f"[SYNTH] {market} CALL | Momentum ADX {adx_val:.1f}")
+    # Widen RSI range — synthetics trend strongly so RSI can be extreme
+    if bull(-1) and bull(-2) and bull(-3) and e9>e21 and 42<=rsi_val<=75 and 0.35<=bb_pct<=0.90:
+        log.info(f"[SYNTH] {market} CALL | Momentum ADX {adx_val:.1f} RSI {rsi_val:.1f}")
         return _build(market, "CALL", "normal", candles)
 
-    if bear(-1) and bear(-2) and bear(-3) and e9<e21 and 34<=rsi_val<=52 and 0.20<=bb_pct<=0.55:
-        log.info(f"[SYNTH] {market} PUT | Momentum ADX {adx_val:.1f}")
+    if bear(-1) and bear(-2) and bear(-3) and e9<e21 and 25<=rsi_val<=58 and 0.10<=bb_pct<=0.65:
+        log.info(f"[SYNTH] {market} PUT | Momentum ADX {adx_val:.1f} RSI {rsi_val:.1f}")
         return _build(market, "PUT", "normal", candles)
 
     return _no_signal(market)
