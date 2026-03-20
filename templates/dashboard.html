@@ -58,6 +58,9 @@
     .bd{background:transparent;color:var(--blue);border-color:var(--blue)}
     .bl{background:transparent;color:var(--amber);border-color:var(--amber)}
     .br{background:transparent;color:var(--muted);border-color:var(--bdr2)}
+    .risk-btn.active{background:rgba(0,245,160,0.15);color:var(--green);border-color:var(--green);font-weight:700}
+    .risk-btn.active.warn{background:rgba(255,179,71,0.15);color:var(--amber);border-color:var(--amber)}
+    .risk-btn.active.danger{background:rgba(255,77,109,0.15);color:var(--red);border-color:var(--red)}
 
     .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     @media(max-width:900px){.two-col{grid-template-columns:1fr}}
@@ -130,6 +133,26 @@
       <button class="btn bl" onclick="setMode('live')">LIVE</button>
       <button class="btn br" onclick="loadAll()">↻ REFRESH</button>
     </div>
+
+    <!-- Risk control -->
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--bdr)">
+      <div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px;font-family:var(--mono)">Risk Per Trade</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button id="risk-1" class="btn br risk-btn" onclick="setRisk(1)" style="font-size:13px;padding:10px 20px">1%</button>
+        <button id="risk-2" class="btn br risk-btn" onclick="setRisk(2)" style="font-size:13px;padding:10px 20px">2%</button>
+        <button id="risk-3" class="btn br risk-btn" onclick="setRisk(3)" style="font-size:13px;padding:10px 20px">3%</button>
+        <div style="margin-left:8px">
+          <div style="font-size:11px;color:var(--muted)">Current risk</div>
+          <div id="risk-display" style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">1%</div>
+        </div>
+        <div style="margin-left:8px;max-width:220px">
+          <div style="font-size:11px;color:var(--muted)">Stake per trade</div>
+          <div id="stake-display" style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--text)">$—</div>
+        </div>
+      </div>
+      <!-- Risk description -->
+      <div id="risk-desc" style="margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:8px;border-left:3px solid var(--green);font-size:12px;color:var(--muted);line-height:1.6"></div>
+    </div>
   </div>
 
   <!-- Trade history -->
@@ -195,6 +218,44 @@ function api(url, cb) { fetch(url).then(r=>r.json()).then(cb).catch(e=>console.e
 
 // ── Bot controls ────────────────────────────
 function startBot(){ api('/start', d=>toast(d.status)); }
+
+// ── Risk control ────────────────────────────
+let currentRisk = 1;
+
+function setRisk(pct){
+  currentRisk = pct;
+  api('/set-risk/'+pct, d=>{
+    toast('Risk set to '+pct+'%');
+    updateRiskDisplay(pct, d.balance||0);
+  });
+}
+
+function updateRiskDisplay(pct, balance){
+  // Update buttons
+  document.querySelectorAll('.risk-btn').forEach(b=>b.classList.remove('active','warn','danger'));
+  const btn = document.getElementById('risk-'+pct);
+  if(btn){
+    btn.classList.add('active');
+    if(pct===2) btn.classList.add('warn');
+    if(pct===3) btn.classList.add('danger');
+  }
+  document.getElementById('risk-display').textContent = pct+'%';
+  document.getElementById('risk-display').style.color =
+    pct===1?'var(--green)':pct===2?'var(--amber)':'var(--red)';
+
+  // Calculate stake
+  const bal   = parseFloat(balance)||0;
+  const stake = bal > 0 ? Math.max((bal*(pct/100)).toFixed(2), 0.35) : '—';
+  document.getElementById('stake-display').textContent = bal>0?'$'+stake:'$—';
+
+  // Risk description
+  const descs = {
+    1: '🟢 <strong>Conservative (1%)</strong> — Recommended for beginners. Lose 10 in a row and you still have 90% of your balance. Best for long-term growth.',
+    2: '🟡 <strong>Moderate (2%)</strong> — Balanced risk/reward. Good for experienced traders with a proven win rate above 58%.',
+    3: '🔴 <strong>Aggressive (3%)</strong> — High risk. Only use if your win rate is consistently above 62%. Can grow account fast but also lose fast.'
+  };
+  document.getElementById('risk-desc').innerHTML = descs[pct]||'';
+}
 function stopBot() { api('/stop',  d=>toast(d.status)); }
 function setMode(m){
   if(m==='live'&&!confirm('Switch to LIVE?\nReal money will be traded.')) return;
@@ -231,6 +292,13 @@ function loadStatus(){
       setText('m-con', r.consec_losses||0);
     }
     if(d.last_signals) buildMktGrid(d.last_signals);
+    // Sync risk selector with server setting
+    if(d.risk_pct && d.risk_pct !== currentRisk){
+      currentRisk = d.risk_pct;
+    }
+    if(r && r.balance){
+      updateRiskDisplay(currentRisk, r.balance);
+    }
     if(d.ai_strategy) buildAIPanel(d.ai_strategy);
   });
 }
@@ -512,6 +580,8 @@ function loadAll(){ loadStatus(); loadTrades(); loadLog(); document.getElementBy
 
 loadAll();
 setInterval(loadAll,5000);
+// Init risk display
+setTimeout(()=>updateRiskDisplay(1, 0), 500);
 </script>
 </body>
 </html>
