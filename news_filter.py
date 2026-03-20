@@ -270,33 +270,56 @@ class NewsFilter:
 
     def _fetch_backup(self) -> list:
         """
-        Backup: hardcode known high-impact recurring events.
-        Used when calendar fetch fails.
-        Only blocks on typical high-impact times (NFP Fridays, etc.)
+        Time-based news blackout for known high-impact recurring windows.
+        Covers the most dangerous trading times even without a live calendar.
         """
         now  = datetime.now(timezone.utc)
         hour = now.hour
-        day  = now.weekday()  # 0=Monday, 4=Friday
+        minute = now.minute
+        day  = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
 
         events = []
 
-        # NFP — first Friday of month, 13:30 UTC
-        if day == 4 and hour == 13:
-            events.append({
-                "title":    "Potential NFP / USD High Impact",
-                "currency": "USD",
-                "impact":   "high",
-                "time":     now.replace(minute=30, second=0, microsecond=0)
-            })
+        def _event(title, currency, impact, h, m=30):
+            t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            return {"title":title, "currency":currency, "impact":impact, "time":t}
 
-        # FOMC — typically Wednesdays 19:00 UTC (approximate)
-        if day == 2 and 18 <= hour <= 20:
-            events.append({
-                "title":    "Potential FOMC",
-                "currency": "USD",
-                "impact":   "high",
-                "time":     now.replace(hour=19, minute=0, second=0, microsecond=0)
-            })
+        # ── Daily high-impact windows (always block) ─────────────
+        # London open volatility: 07:00-08:30 UTC
+        if 6 <= hour <= 8:
+            events.append(_event("London Open Volatility", "EUR", "high", 8, 0))
+
+        # NY open + overlap: 12:30-14:00 UTC (most USD data releases)
+        if 12 <= hour <= 14:
+            events.append(_event("NY Open / USD Data Window", "USD", "high", 13, 30))
+
+        # ── Weekly recurring events ───────────────────────────────
+        # Monday: Asian/European open gaps
+        if day == 0 and hour <= 2:
+            events.append(_event("Monday Market Open", "USD", "medium", 0, 0))
+
+        # Tuesday: RBA, specific USD data
+        if day == 1 and hour == 13:
+            events.append(_event("USD Tuesday Data", "USD", "medium", 13, 30))
+
+        # Wednesday: ADP Employment, FOMC minutes/decisions
+        if day == 2:
+            if hour == 12:
+                events.append(_event("ADP Employment / USD Data", "USD", "high", 12, 15))
+            if 18 <= hour <= 20:
+                events.append(_event("FOMC Window (Wednesdays)", "USD", "high", 19, 0))
+
+        # Thursday: ECB, Jobless Claims, GBP data
+        if day == 3:
+            if hour == 12:
+                events.append(_event("Jobless Claims / USD Data", "USD", "high", 12, 30))
+            if hour == 12 and minute < 30:
+                events.append(_event("ECB Decision Window", "EUR", "high", 12, 15))
+
+        # Friday: NFP (first Friday usually, but block every Friday)
+        if day == 4:
+            if hour == 12:
+                events.append(_event("NFP / Payrolls Friday", "USD", "high", 12, 30))
 
         return events
 
