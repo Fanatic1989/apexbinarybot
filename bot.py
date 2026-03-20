@@ -148,11 +148,19 @@ def _parallel_scan(markets):
     with ThreadPoolExecutor(max_workers=max_workers,
                             thread_name_prefix="Scan") as ex:
         futures = {ex.submit(_scan_market, m): m for m in markets}
-        for fut in as_completed(futures, timeout=120):
-            try:
-                fut.result()
-            except Exception as e:
-                log.error(f"[{futures[fut]}] Thread error: {e}")
+        # Timeout = longest possible trade settlement (15min forex + 5min buffer)
+        done, pending = [], []
+        try:
+            for fut in as_completed(futures, timeout=1200):
+                try:
+                    fut.result()
+                except Exception as e:
+                    log.error(f"[{futures[fut]}] Thread error: {e}")
+        except Exception as e:
+            pending = [m for fut, m in futures.items() if not fut.done()]
+            if pending:
+                log.warning(f"[BOT] {len(pending)} markets still settling: "
+                            f"{pending} — this is normal for 15min forex trades")
 
 
 def _scan_market(market):
