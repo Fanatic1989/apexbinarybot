@@ -213,11 +213,6 @@ def _synthetic_regime(df, candles, market):
 
 
 def _synth_bb_scalp(df, candles, market):
-    """
-    BB Scalping — the primary synthetic strategy.
-    Price closes OUTSIDE BB band + engulfing candle forms = entry.
-    R_100 and JD100 are faster — accept lower score threshold.
-    """
     close = df["close"]
     bb    = _bollinger_bands(close)
     if bb is None:
@@ -226,7 +221,6 @@ def _synth_bb_scalp(df, candles, market):
     upper, lower, mid = bb
     last   = df.iloc[-1]
     prev   = df.iloc[-2]
-    prev2  = df.iloc[-3]
 
     last_close = float(last["close"])
     last_open  = float(last["open"])
@@ -235,20 +229,23 @@ def _synth_bb_scalp(df, candles, market):
 
     last_bull = last_close > last_open
     last_bear = last_close < last_open
-    prev_bull = prev_close > prev_open
-    prev_bear = prev_close < prev_open
 
-    last_upper = upper.iloc[-1]
-    last_lower = lower.iloc[-1]
-    prev_upper = upper.iloc[-2]
-    prev_lower = lower.iloc[-2]
+    last_upper = float(upper.iloc[-1])
+    last_lower = float(lower.iloc[-1])
+    prev_upper = float(upper.iloc[-2])
+    prev_lower = float(lower.iloc[-2])
 
-    # Engulfing candle check
     body_last = abs(last_close - last_open)
     body_prev = abs(prev_close - prev_open)
-    engulfing = body_last > body_prev * 0.8  # last candle engulfs previous
+    engulfing = body_last > body_prev * 0.8
 
-    adx_val = _adx(df)
+    adx_val  = _adx(df)
+    bb_range = last_upper - last_lower
+    bb_pct   = (last_close - last_lower) / bb_range if bb_range > 0 else 0.5
+
+    log.info(f"[BB] {market} | bb%={bb_pct:.2f} ADX={adx_val:.1f} "
+             f"{'BULL' if last_bull else 'BEAR'} engulf={engulfing} "
+             f"prev_close={prev_close:.4f} prev_lower={prev_lower:.4f} prev_upper={prev_upper:.4f}")
 
     last_upper_val = float(last_upper)
     last_lower_val = float(last_lower)
@@ -321,15 +318,17 @@ def _synth_false_breakout(df, candles, market):
 
 
 def _synth_momentum(df, candles, market):
-    """Momentum continuation for trending synthetic markets."""
     close   = df["close"]
     rsi_val = float(_rsi(close).iloc[-1])
     adx_val = _adx(df)
     e9      = float(_ema(close, 9).iloc[-1])
     e21     = float(_ema(close, 21).iloc[-1])
 
-    # Only trade momentum when ADX confirms some trend
+    log.info(f"[MOM] {market} | RSI={rsi_val:.1f} ADX={adx_val:.1f} "
+             f"EMA9={e9:.4f} EMA21={e21:.4f}")
+
     if adx_val < 18:
+        log.info(f"[MOM] {market} ADX {adx_val:.1f} < 18 — skip")
         return _no_signal(market)
 
     def bull(i): return float(df.iloc[i]["close"]) > float(df.iloc[i]["open"])
