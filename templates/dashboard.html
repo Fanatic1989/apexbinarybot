@@ -185,6 +185,17 @@
     </div>
   </div>
 
+  <!-- News filter panel -->
+  <div class="card" id="news-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <span class="ctitle" style="margin-bottom:0">📰 Upcoming News — Auto Blackout</span>
+      <span id="news-status" class="pill pg" style="font-size:10px">● Active</span>
+    </div>
+    <div id="news-events" style="display:flex;flex-wrap:wrap;gap:6px">
+      <span style="font-size:12px;color:var(--muted)">Loading calendar...</span>
+    </div>
+  </div>
+
   <!-- AI Strategy Panel -->
   <div class="card" id="ai-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
@@ -543,6 +554,27 @@ function toast(msg){
   t.textContent=msg;t.style.display='block';
   setTimeout(()=>t.style.display='none',2500);
 }
+function buildNewsPanel(events){
+  const box = document.getElementById('news-events');
+  if(!events || events.length === 0){
+    box.innerHTML = '<span style="font-size:12px;color:var(--muted)">✅ No high-impact news in next 4 hours — safe to trade</span>';
+    return;
+  }
+  let h = '';
+  events.forEach(e=>{
+    const col = e.impact==='high'?'#ff4d6d':'#ffb347';
+    const bg  = e.impact==='high'?'rgba(255,77,109,0.08)':'rgba(255,179,71,0.08)';
+    const bdr = e.impact==='high'?'rgba(255,77,109,0.25)':'rgba(255,179,71,0.25)';
+    const icon= e.impact==='high'?'🔴':'🟠';
+    h += `<div style="background:${bg};border:1px solid ${bdr};border-radius:8px;padding:8px 12px;min-width:160px">
+      <div style="font-size:10px;font-family:var(--mono);font-weight:700;color:${col}">${icon} ${e.currency} ${e.impact.toUpperCase()}</div>
+      <div style="font-size:11px;color:var(--text);margin-top:3px">${e.title}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:3px;font-family:var(--mono)">${e.time_utc} · ${e.mins_away}m away</div>
+    </div>`;
+  });
+  box.innerHTML = h;
+}
+
 function buildAIPanel(ai){
   if(!ai||!ai.win_rates) return;
   const NAMES = {
