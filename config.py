@@ -56,7 +56,7 @@ FOREX_MARKETS = [
 
 ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD", "frxEURJPY"]
 
-MARKETS = list(dict.fromkeys(FOREX_MARKETS + SYNTHETIC_MARKETS))
+MARKETS = list(dict.fromkeys(FOREX_MARKETS + COMMODITY_MARKETS + SYNTHETIC_MARKETS))
 
 # ─────────────────────────────────────────
 # Session detection
@@ -98,15 +98,19 @@ SYNTHETIC_EXPIRY = {
     "CRASH500": 1, "CRASH1000": 1,
 }
 
-FOREX_EXPIRY_OPTIONS = [15, 30, 60, 120]
+FOREX_EXPIRY_OPTIONS      = [15, 30, 60, 120]
+COMMODITY_EXPIRY_OPTIONS  = [15, 30, 60]
 
 def get_expiry(market: str) -> int:
-    if is_forex(market):
-        return FOREX_EXPIRY_OPTIONS[0]
+    if is_commodity(market): return COMMODITY_EXPIRY_OPTIONS[0]
+    if is_forex(market):     return FOREX_EXPIRY_OPTIONS[0]
     return SYNTHETIC_EXPIRY.get(market, 3)
 
 def is_forex(market: str) -> bool:
-    return market.startswith("frx")
+    return market.startswith("frx") and not is_commodity(market)
+
+def is_commodity(market: str) -> bool:
+    return market in ("frxXAUUSD", "frxXAGUSD")
 
 # ─────────────────────────────────────────
 # Risk management
