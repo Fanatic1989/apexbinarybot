@@ -229,22 +229,34 @@ def _synth_bb_scalp(df, candles, market):
 
     adx_val = _adx(df)
 
+    last_upper_val = float(last_upper)
+    last_lower_val = float(last_lower)
+    last_bb_pct    = (last_close - last_lower_val) / (last_upper_val - last_lower_val) if (last_upper_val - last_lower_val) > 0 else 0.5
+
+    log.debug(f"[SYNTH] {market} BB% {last_bb_pct:.2f} RSI — ADX {adx_val:.1f}")
+
     # CALL: previous candle closed below lower BB + current is bullish engulfing
     if prev_close < prev_lower and last_bull and engulfing:
-        # ADX filter: prefer ranging market for mean reversion
         if adx_val < 30:
             conf = "high" if adx_val < 20 else "normal"
-            log.info(f"[SYNTH] {market} CALL | BB lower pierce + engulf | "
-                     f"ADX {adx_val:.1f}")
+            log.info(f"[SYNTH] {market} CALL | BB lower pierce + engulf | ADX {adx_val:.1f}")
             return _build(market, "CALL", conf, candles)
 
     # PUT: previous candle closed above upper BB + current is bearish engulfing
     if prev_close > prev_upper and last_bear and engulfing:
         if adx_val < 30:
             conf = "high" if adx_val < 20 else "normal"
-            log.info(f"[SYNTH] {market} PUT | BB upper pierce + engulf | "
-                     f"ADX {adx_val:.1f}")
+            log.info(f"[SYNTH] {market} PUT | BB upper pierce + engulf | ADX {adx_val:.1f}")
             return _build(market, "PUT", conf, candles)
+
+    # RELAXED: price is AT or very near the band (within 2%) with engulfing — still trade
+    if last_bb_pct < 0.06 and last_bull and engulfing and adx_val < 28:
+        log.info(f"[SYNTH] {market} CALL | BB lower zone {last_bb_pct:.2f} + engulf")
+        return _build(market, "CALL", "normal", candles)
+
+    if last_bb_pct > 0.94 and last_bear and engulfing and adx_val < 28:
+        log.info(f"[SYNTH] {market} PUT | BB upper zone {last_bb_pct:.2f} + engulf")
+        return _build(market, "PUT", "normal", candles)
 
     # Wider tolerance for faster indices (R_100, JD100)
     fast_market = market in ("R_100", "JD100", "1HZ100V")
@@ -295,8 +307,8 @@ def _synth_momentum(df, candles, market):
     e9      = float(_ema(close, 9).iloc[-1])
     e21     = float(_ema(close, 21).iloc[-1])
 
-    # Only trade momentum when ADX confirms trend
-    if adx_val < 22:
+    # Only trade momentum when ADX confirms some trend
+    if adx_val < 18:
         return _no_signal(market)
 
     def bull(i): return float(df.iloc[i]["close"]) > float(df.iloc[i]["open"])
@@ -536,14 +548,26 @@ def _build(market, direction, base_conf, candles):
     raw    = {"market":market,"direction":direction,"expiry":config.get_expiry(market)}
     result = sniper_confirm(candles, raw)
     score  = result.get("score", 0)
-    if score >= 3:
+
+    # Regime-specific confirmation rules:
+    # HIGH base = strategy has strong built-in conditions (pivot+stoch, FVG, BB engulf)
+    #   → trade at any sniper score (strategy conditions already strict)
+    # NORMAL base = standard strategy
+    #   → require sniper score >= 1 as extra gate
+
+    if base_conf == "high":
         result["confirmed"]  = True
-        result["confidence"] = "high"
-    elif score >= 2 and base_conf == "high":
-        result["confirmed"]  = True
-        result["confidence"] = "normal"
+        result["confidence"] = "high" if score >= 2 else "normal"
     else:
-        result["confirmed"]  = False
+        # Normal strategies need at least 1 sniper confirmation
+        if score >= 2:
+            result["confirmed"]  = True
+            result["confidence"] = "high"
+        elif score >= 1:
+            result["confirmed"]  = True
+            result["confidence"] = "normal"
+        else:
+            result["confirmed"]  = False
     return result
 
 def _no_signal(market):
