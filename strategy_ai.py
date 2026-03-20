@@ -158,23 +158,34 @@ class AIStrategySelector:
 
     def _thompson_sampling(self) -> str:
         """
-        Thompson Sampling — the mathematically optimal way to balance
-        exploitation (use what's working) vs exploration (try new things).
+        Thompson Sampling with a minimum performance floor.
 
-        For each strategy, samples from a Beta distribution using
-        wins as alpha and losses as beta. Higher win rates get
-        selected more often but all strategies get tried occasionally.
+        If a strategy has 3+ trades and win rate below 45%,
+        it gets excluded from selection until it proves itself.
+        This prevents the AI from repeatedly picking losers.
         """
         import random
         scores = {}
         for name, stats in self.tracker.data["strategies"].items():
-            w = stats["wins"] + 1    # +1 = Laplace smoothing (avoid zero)
+            w = stats["wins"] + 1
             l = stats["losses"] + 1
-            # Sample from Beta(wins, losses) distribution
+            total = stats["wins"] + stats["losses"]
+            wr    = stats["wins"] / total if total > 0 else 0.5
+
+            # Exclude strategies with proven poor performance
+            if total >= 4 and wr < 0.45:
+                log.debug(f"[AI] {name} excluded — {wr:.0%} WR after {total} trades")
+                scores[name] = 0.0
+                continue
+
             scores[name] = random.betavariate(w, l)
 
-        best = max(scores, key=scores.get)
-        return best
+        # If all excluded, reset and pick randomly
+        if max(scores.values()) == 0:
+            log.warning("[AI] All strategies underperforming — resetting selection")
+            return random.choice(self.tracker.STRATEGIES)
+
+        return max(scores, key=scores.get)
 
     def _condition_based(self, candles: list, market: str) -> str:
         """
