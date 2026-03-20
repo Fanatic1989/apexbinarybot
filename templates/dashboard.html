@@ -558,7 +558,8 @@ function buildAIPanel(ai){
     const wr = parseFloat(v.win_rate||0);
     const col = wr>=65?'var(--green)':wr>=55?'var(--amber)':'var(--red)';
     const bar = Math.min(100,wr);
-    if(wr>bestWR&&v.total>=3){bestWR=wr;best=s;}
+    // Only mark as BEST if win rate is above 55% AND has 3+ trades
+    if(wr>bestWR && wr>=55 && v.total>=3){bestWR=wr;best=s;}
     html += `<div style="background:var(--bg3);border:1px solid ${wr>=60?col:'var(--bdr)'};border-radius:8px;padding:10px 12px;position:relative;overflow:hidden">
       <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">${NAMES[s]||s}</div>
       <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${col};margin:4px 0">${v.win_rate||'—'}%</div>
