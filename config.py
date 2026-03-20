@@ -54,6 +54,11 @@ FOREX_MARKETS = [
     "frxEURGBP", "frxEURJPY", "frxGBPJPY",
 ]
 
+COMMODITY_MARKETS = [
+    "frxXAUUSD",   # Gold / USD
+    "frxXAGUSD",   # Silver / USD
+]
+
 ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD", "frxEURJPY"]
 
 MARKETS = list(dict.fromkeys(FOREX_MARKETS + COMMODITY_MARKETS + SYNTHETIC_MARKETS))
@@ -82,7 +87,7 @@ def get_active_markets() -> list:
         return SYNTHETIC_MARKETS
     session = get_current_session()
     if session in ("LONDON_NY_OVERLAP", "LONDON", "NEW_YORK"):
-        return FOREX_MARKETS + SYNTHETIC_MARKETS
+        return FOREX_MARKETS + COMMODITY_MARKETS + SYNTHETIC_MARKETS
     if session == "ASIAN":
         return ASIAN_FOREX + SYNTHETIC_MARKETS
     return SYNTHETIC_MARKETS
