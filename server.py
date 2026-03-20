@@ -1,455 +1,355 @@
-import os
+"""
+Economic News Filter
+
+Fetches the economic calendar from ForexFactory and blocks
+trading 15 minutes before and after high-impact news events.
+
+Impact levels:
+  🔴 Red    = HIGH impact   — always block
+  🟠 Orange = MEDIUM impact — block for forex/commodities only
+  🟡 Yellow = LOW impact    — ignore
+
+No API key needed — uses ForexFactory public RSS feed.
+"""
 import json
-import threading
+import time
 import logging
-from datetime import datetime
-from functools import wraps
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone, timedelta
+from xml.etree import ElementTree
 
-from flask import Flask, jsonify, request, render_template, redirect, url_for, session
-
-import config
-import bot
-
-# ─────────────────────────────────────────
-# Logging
-# ─────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────
-# Flask app
+# Module-level cache — shared across all calls
+# Only fetches once per 4 hours regardless of
+# how many markets are scanning simultaneously
 # ─────────────────────────────────────────
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", config.ADMIN_PASSWORD or "apex-secret-key-change-me")
+_news_cache     = []
+_cache_ts       = 0
+_fetch_lock     = None   # set on first use
+_CACHE_TTL      = 14400  # 4 hours
+_RETRY_AFTER    = 3600   # if fetch fails, retry after 1 hour not every scan
+_last_fail_ts   = 0
+_BLOCK_BEFORE   = 15 * 60
+_BLOCK_AFTER    = 15 * 60
 
-# ─────────────────────────────────────────
-# Bot thread state
-# ─────────────────────────────────────────
-bot_thread    = None
-bot_running   = False
-bot_stop_flag = threading.Event()
-
-TRADE_HISTORY_FILE = "trade_history.json"
-
-# ─────────────────────────────────────────
-# Login required decorator
-# ─────────────────────────────────────────
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get("logged_in"):
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return decorated
-
-
-# ─────────────────────────────────────────
-# Route: Login
-# ─────────────────────────────────────────
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
-
-        if username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
-            session["logged_in"] = True
-            session["username"]  = username
-            log.info(f"[SERVER] Login successful for '{username}'")
-            return redirect(url_for("dashboard"))
-        else:
-            error = "Invalid username or password"
-            log.warning(f"[SERVER] Failed login attempt for '{username}'")
-
-    return render_template("login.html", error=error)
+# Currency to market mapping
+CURRENCY_MARKETS = {
+    "USD": ["frxEURUSD","frxGBPUSD","frxUSDJPY","frxUSDCAD","frxUSDCHF",
+            "frxEURJPY","frxGBPJPY","frxXAUUSD","frxXAGUSD"],
+    "EUR": ["frxEURUSD","frxEURGBP","frxEURJPY"],
+    "GBP": ["frxGBPUSD","frxEURGBP","frxGBPJPY"],
+    "JPY": ["frxUSDJPY","frxEURJPY","frxGBPJPY"],
+    "AUD": ["frxAUDUSD"],
+    "CAD": ["frxUSDCAD"],
+    "CHF": ["frxUSDCHF"],
+    "XAU": ["frxXAUUSD"],  # Gold affected by USD news too
+    "XAG": ["frxXAGUSD"],
+}
 
 
-# ─────────────────────────────────────────
-# Route: Logout
-# ─────────────────────────────────────────
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
+class NewsFilter:
+    def __init__(self):
+        self._cache    = []
+        self._cache_ts = 0
+        self._enabled  = True
 
+    def is_news_time(self, market: str) -> tuple:
+        """
+        Check if current time is within news blackout window for this market.
 
-# ─────────────────────────────────────────
-# Route: Dashboard
-# ─────────────────────────────────────────
-@app.route("/")
-@login_required
-def dashboard():
-    return render_template("dashboard.html")
+        Returns (bool, str) — (is_blocked, reason)
+        """
+        if not self._enabled:
+            return False, ""
 
+        now = datetime.now(timezone.utc)
+        events = self._get_events()
 
-# ─────────────────────────────────────────
-# Route: Status
-# ─────────────────────────────────────────
-@app.route("/status")
-@login_required
-def status():
-    risk_summary = None
-    if hasattr(bot, "risk_manager") and bot.risk_manager:
-        risk_summary = bot.risk_manager.get_summary()
-    staking_info = None
-    if hasattr(bot, "staking_engine") and bot.staking_engine:
-        staking_info = bot.staking_engine.get_info()
+        # Determine which currencies affect this market
+        affected_currencies = []
+        for currency, markets in CURRENCY_MARKETS.items():
+            if market in markets:
+                affected_currencies.append(currency)
 
-    # AI strategy performance
-    ai_info = None
-    try:
-        from strategy_ai import tracker
-        ai_info = tracker.get_summary()
-    except: pass
+        # Synthetics — only block on major USD/global events
+        is_synthetic = not market.startswith("frx")
+        if is_synthetic:
+            affected_currencies = ["USD"]  # synthetics only block on USD news
 
-    return jsonify({
-        "bot_running":     bot_running,
-        "mode":            config.MODE,
-        "markets":         len(config.MARKETS),
-        "active_markets":  len(config.get_active_markets()),
-        "interval":        config.SCAN_INTERVAL,
-        "session":         config.get_current_session(),
-        "risk":            risk_summary,
-        "staking":         staking_info,
-        "last_signals":    getattr(bot, "last_signals", []),
-        "ai_strategy":     ai_info,
-        "risk_pct":        int(config.STAKE_PERCENT),
-        "news_events":     _get_upcoming_news()
-    })
+        for event in events:
+            event_time = event.get("time")
+            impact     = event.get("impact", "low")
+            currency   = event.get("currency", "")
+            title      = event.get("title", "")
 
-def _get_upcoming_news():
-    try:
-        from news_filter import news_filter
-        return news_filter.get_upcoming_events(hours=4)
-    except:
-        return []
+            if not event_time:
+                continue
 
+            # Check if this event affects our market
+            if currency not in affected_currencies:
+                continue
 
-# ─────────────────────────────────────────
-# Route: Start bot
-# ─────────────────────────────────────────
-@app.route("/start")
-@login_required
-def start_bot():
-    global bot_thread, bot_running, bot_stop_flag
+            # Skip low impact for most markets
+            if impact == "low":
+                continue
 
-    if bot_running and bot_thread and bot_thread.is_alive():
-        return jsonify({"status": "bot already running"})
+            # Skip medium impact for synthetics
+            if is_synthetic and impact == "medium":
+                continue
 
-    bot_stop_flag.clear()
-    bot_running = True
+            # Check time window
+            time_to_news   = (event_time - now).total_seconds()
+            time_since_news= (now - event_time).total_seconds()
 
-    bot_thread = threading.Thread(target=_run_bot_safe, daemon=True, name="BotThread")
-    bot_thread.start()
+            if -_BLOCK_BEFORE <= time_to_news <= 0:
+                # News is coming up
+                mins = abs(time_to_news) / 60
+                reason = (f"⏰ {currency} {impact.upper()} news in {mins:.0f}m: {title}")
+                log.info(f"[NEWS] {market} blocked — {reason}")
+                return True, reason
 
-    log.info("[SERVER] Bot thread started.")
-    return jsonify({"status": "bot started"})
+            if 0 <= time_since_news <= _BLOCK_AFTER:
+                # News just happened
+                mins = time_since_news / 60
+                reason = (f"📰 {currency} {impact.upper()} news {mins:.0f}m ago: {title}")
+                log.info(f"[NEWS] {market} blocked — {reason}")
+                return True, reason
 
+        return False, ""
 
-# ─────────────────────────────────────────
-# Route: Stop bot
-# ─────────────────────────────────────────
-@app.route("/stop")
-@login_required
-def stop_bot():
-    global bot_running
-    bot_running = False
-    bot_stop_flag.set()
-    log.info("[SERVER] Bot stop requested.")
-    return jsonify({"status": "bot stopped"})
+    def _get_events(self) -> list:
+        """
+        Get economic calendar events.
+        Uses module-level cache shared across all instances.
+        Only one HTTP fetch per 4 hours regardless of how many
+        markets are scanning simultaneously.
+        """
+        global _news_cache, _cache_ts, _last_fail_ts, _fetch_lock
+        import threading
 
+        now = time.time()
 
-# ─────────────────────────────────────────
-# Route: Switch mode
-# ─────────────────────────────────────────
-@app.route("/mode/<mode>")
-@login_required
-def change_mode(mode):
-    if mode not in ("demo", "live"):
-        return jsonify({"error": "Mode must be 'demo' or 'live'"}), 400
+        # Return cached data if still fresh
+        if _news_cache and (now - _cache_ts) < _CACHE_TTL:
+            return _news_cache
 
-    global bot_running
-    bot_running = False
-    bot_stop_flag.set()
+        # Don't retry too soon after a failure (wait 1 hour)
+        if not _news_cache and (now - _last_fail_ts) < _RETRY_AFTER:
+            return _news_cache
 
-    config.MODE         = mode
-    config.ACTIVE_TOKEN = config.get_active_token()
+        # Thread lock — only ONE thread fetches at a time
+        if _fetch_lock is None:
+            _fetch_lock = threading.Lock()
 
-    log.info(f"[SERVER] Mode switched to {mode.upper()}")
-    return jsonify({
-        "mode":   config.MODE,
-        "status": "bot stopped for mode switch — restart manually"
-    })
+        if not _fetch_lock.acquire(blocking=False):
+            # Another thread is already fetching — return existing cache
+            return _news_cache
 
+        try:
+            events = self._fetch_forexfactory()
+            if events:
+                _news_cache = events
+                _cache_ts   = now
+                log.info(f"[NEWS] Calendar updated — {len(events)} events loaded")
+                # Save to disk for persistence across restarts
+                self._save_cache(events)
+            else:
+                _last_fail_ts = now
+                # Try loading from disk first
+                disk = self._load_cache()
+                if disk:
+                    _news_cache = disk
+                    _cache_ts   = now
+                    log.info(f"[NEWS] Loaded {len(disk)} events from disk cache")
+                elif not _news_cache:
+                    backup = self._fetch_backup()
+                    if backup:
+                        _news_cache = backup
+                        _cache_ts   = now
+        finally:
+            _fetch_lock.release()
 
-# ─────────────────────────────────────────
-# Route: Set risk percentage
-# ─────────────────────────────────────────
-@app.route("/set-risk/<int:pct>")
-@login_required
-def set_risk(pct):
-    if pct not in (1, 2, 3):
-        return jsonify({"error": "Risk must be 1, 2 or 3"}), 400
+        return _news_cache
 
-    config.STAKE_PERCENT = float(pct)
-
-    # Update staking engine immediately if bot is running
-    balance = 0.0
-    if hasattr(bot, "risk_manager") and bot.risk_manager:
-        balance = bot.risk_manager.current_balance
-
-    if hasattr(bot, "staking_engine") and bot.staking_engine:
-        new_stake = max(balance * (pct/100), 0.35) if balance > 0 else 0.35
-        bot.staking_engine.base_stake    = round(new_stake, 2)
-        bot.staking_engine.current_stake = round(new_stake, 2)
-
-    log.info(f"[SERVER] Risk set to {pct}% | "
-             f"Stake: ${balance*(pct/100):.2f} per trade")
-
-    return jsonify({
-        "risk_pct": pct,
-        "stake":    round(balance*(pct/100), 2) if balance > 0 else 0,
-        "balance":  round(balance, 2)
-    })
-
-
-# ─────────────────────────────────────────
-# Route: Trade history
-# ─────────────────────────────────────────
-@app.route("/trades")
-@login_required
-def trades():
-    try:
-        with open(TRADE_HISTORY_FILE) as f:
-            data = json.load(f)
-        return jsonify(data)
-    except FileNotFoundError:
-        return jsonify({"trades": []})
-    except Exception as e:
-        log.error(f"[SERVER] Error reading trade history: {e}")
-        return jsonify({"trades": [], "error": str(e)})
-
-
-# ─────────────────────────────────────────
-# Route: Log lines
-# ─────────────────────────────────────────
-_log_lines = []
-
-class _LogHandler(logging.Handler):
-    def emit(self, record):
-        _log_lines.append(self.format(record))
-        if len(_log_lines) > 200:
-            _log_lines.pop(0)
-
-_handler = _LogHandler()
-_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
-logging.getLogger().addHandler(_handler)
-
-@app.route("/log")
-@login_required
-def get_log():
-    return jsonify({"lines": list(reversed(_log_lines[-50:]))})
-
-
-# ─────────────────────────────────────────
-# Route: Test forex symbols
-# ─────────────────────────────────────────
-@app.route("/test-forex")
-@login_required
-def test_forex():
-    import websocket, json
-    results = {}
-    symbols = [
-        "frxEURUSD","frxGBPUSD","frxUSDJPY",
-        "frxGBPJPY","frxEURGBP","frxAUDUSD",
-        "frxEURJPY","frxUSDCAD","frxUSDCHF",
-    ]
-    ws = None
-    try:
-        ws = websocket.create_connection(
-            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            timeout=15
-        )
-        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        auth = json.loads(ws.recv())
-        if "error" in auth:
-            return jsonify({"error": auth["error"]["message"]})
-
-        for sym in symbols:
-            try:
-                ws.send(json.dumps({
-                    "ticks_history": sym,
-                    "adjust_start_time": 1,
-                    "count": 3,
-                    "end": "latest",
-                    "style": "candles",
-                    "granularity": 60
-                }))
-                r = json.loads(ws.recv())
-                if "candles" in r:
-                    results[sym] = "✓ WORKS"
-                elif "error" in r:
-                    results[sym] = f"✗ {r['error']['message']}"
-                else:
-                    results[sym] = "✗ No data"
-            except Exception as e:
-                results[sym] = f"✗ Exception: {e}"
-    except Exception as e:
-        return jsonify({"error": str(e), "results": results})
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
-
-    return jsonify({"results": results})
-
-
-# ─────────────────────────────────────────
-# Route: Test valid durations for forex
-# ─────────────────────────────────────────
-@app.route("/test-durations")
-@login_required
-def test_durations():
-    import websocket as _ws, json as _json
-    symbol = request.args.get("symbol", "frxEURUSD")
-    durations = [
-        (1,"m"),(2,"m"),(3,"m"),(5,"m"),(10,"m"),(15,"m"),(30,"m"),
-        (60,"m"),(1,"h"),(1,"d"),
-        (15,"s"),(30,"s"),(60,"s"),(90,"s"),(120,"s"),(300,"s"),
-    ]
-    results = {}
-    ws = None
-    try:
-        ws = _ws.create_connection(
-            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            timeout=15
-        )
-        ws.send(_json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        auth = _json.loads(ws.recv())
-        if "error" in auth:
-            return jsonify({"error": auth["error"]["message"]})
-        for dur, unit in durations:
-            try:
-                ws.send(_json.dumps({
-                    "proposal": 1, "amount": 1, "basis": "stake",
-                    "contract_type": "CALL", "currency": "USD",
-                    "duration": dur, "duration_unit": unit,
-                    "symbol": symbol
-                }))
-                r = _json.loads(ws.recv())
-                key = f"{dur}{unit}"
-                if "proposal" in r:
-                    results[key] = f"✓ payout ${r['proposal']['payout']:.2f}"
-                else:
-                    results[key] = f"✗ {r.get('error',{}).get('message','No data')}"
-            except Exception as e:
-                results[f"{dur}{unit}"] = f"✗ {e}"
-    except Exception as e:
-        return jsonify({"error": str(e)})
-    finally:
-        if ws:
-            try: ws.close()
-            except: pass
-    working = {k:v for k,v in results.items() if v.startswith("✓")}
-    return jsonify({"symbol": symbol, "working": working, "all": results})
-
-
-# ─────────────────────────────────────────
-# Route: Health check — NO login required
-# Render pings this to keep container alive
-# ─────────────────────────────────────────
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
-
-
-
-# ─────────────────────────────────────────
-# Route: Connection test (debug)
-# ─────────────────────────────────────────
-@app.route("/test-connection")
-@login_required
-def test_connection():
-    """Test Deriv API connection and show exactly what is failing."""
-    import websocket, json
-    results = {
-        "app_id":     config.DERIV_APP_ID,
-        "mode":       config.MODE,
-        "token_set":  bool(config.ACTIVE_TOKEN),
-        "token_preview": config.ACTIVE_TOKEN[:6] + "..." if config.ACTIVE_TOKEN else "NOT SET",
-        "ws_url":     f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-        "auth_result": None,
-        "balance":    None,
-        "error":      None
-    }
-    try:
-        ws = websocket.create_connection(results["ws_url"], timeout=10)
-        ws.send(json.dumps({"authorize": config.ACTIVE_TOKEN}))
-        resp = json.loads(ws.recv())
-        if "error" in resp:
-            results["auth_result"] = "FAILED"
-            results["error"] = resp["error"]["message"]
-        else:
-            results["auth_result"] = "SUCCESS"
-            results["balance"] = resp.get("authorize", {}).get("balance")
-        ws.close()
-    except Exception as e:
-        results["auth_result"] = "EXCEPTION"
-        results["error"] = str(e)
-    return jsonify(results)
-
-# ─────────────────────────────────────────
-# Watchdog — auto restart bot if it crashes
-# ─────────────────────────────────────────
-def _watchdog():
-    """
-    Runs in background. If bot_running=True but
-    thread is dead, restarts the bot automatically.
-    """
-    import time as _time
-    _time.sleep(60)  # initial delay
-    while True:
-        global bot_thread, bot_running
-        if bot_running and (bot_thread is None or not bot_thread.is_alive()):
-            log.warning("[WATCHDOG] Bot thread died — auto restarting...")
-            bot_thread = threading.Thread(
-                target=_run_bot_safe, daemon=True, name="BotThread"
+    def _fetch_forexfactory(self) -> list:
+        """Fetch economic calendar from public JSON source."""
+        try:
+            # Primary: nfs.faireconomy.media (ForexFactory public feed)
+            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept":     "application/json",
+                }
             )
-            bot_thread.start()
-            log.info("[WATCHDOG] Bot restarted.")
-        _time.sleep(30)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
 
-# Start watchdog on import
-_watchdog_thread = threading.Thread(target=_watchdog, daemon=True, name="Watchdog")
-_watchdog_thread.start()
+            # Also try next week's calendar
+            try:
+                url2 = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+                req2 = urllib.request.Request(url2, headers={"User-Agent":"Mozilla/5.0"})
+                with urllib.request.urlopen(req2, timeout=5) as r2:
+                    data2 = json.loads(r2.read().decode())
+                    data = data + data2
+            except:
+                pass
 
-# ─────────────────────────────────────────
-# Bot runner wrapper
-# ─────────────────────────────────────────
-def _run_bot_safe():
-    global bot_running
-    try:
-        bot.run_bot()
-    except Exception as e:
-        log.error(f"[SERVER] Bot thread crashed: {e}", exc_info=True)
-    finally:
-        bot_running = False
-        log.info("[SERVER] Bot thread exited.")
+            events = []
+            for item in data:
+                impact = item.get("impact","").lower()
+                if impact not in ("high","medium","low"):
+                    continue
+                if impact == "low":
+                    continue
+
+                # Parse time
+                try:
+                    date_str = item.get("date","")
+                    time_str = item.get("time","")
+                    if not date_str:
+                        continue
+
+                    # ForexFactory format: "03-17-2025" and "8:30am"
+                    if time_str and time_str.lower() != "all day":
+                        dt_str = f"{date_str} {time_str}"
+                        event_time = datetime.strptime(dt_str, "%m-%d-%Y %I:%M%p")
+                        event_time = event_time.replace(tzinfo=timezone.utc)
+                    else:
+                        continue  # skip all-day events
+
+                    events.append({
+                        "title":    item.get("title",""),
+                        "currency": item.get("country","").upper(),
+                        "impact":   impact,
+                        "time":     event_time,
+                    })
+                except Exception:
+                    continue
+
+            return events
+
+        except Exception as e:
+            log.warning(f"[NEWS] ForexFactory fetch failed: {e}")
+            return []
+
+    def _save_cache(self, events: list):
+        """Save calendar to disk so it survives restarts."""
+        try:
+            cache_data = [
+                {**e, "time": e["time"].isoformat()}
+                for e in events if e.get("time")
+            ]
+            with open("news_cache.json", "w") as f:
+                json.dump({"ts": time.time(), "events": cache_data}, f)
+        except Exception as e:
+            log.debug(f"[NEWS] Cache save failed: {e}")
+
+    def _load_cache(self) -> list:
+        """Load calendar from disk if fresh enough."""
+        try:
+            with open("news_cache.json") as f:
+                data = json.load(f)
+            # Only use if less than 12 hours old
+            if time.time() - data.get("ts", 0) > 43200:
+                return []
+            events = []
+            for e in data.get("events", []):
+                try:
+                    e["time"] = datetime.fromisoformat(e["time"])
+                    events.append(e)
+                except:
+                    continue
+            return events
+        except:
+            return []
+
+    def _fetch_backup(self) -> list:
+        """
+        Time-based news blackout for known high-impact recurring windows.
+        Covers the most dangerous trading times even without a live calendar.
+        """
+        now  = datetime.now(timezone.utc)
+        hour = now.hour
+        minute = now.minute
+        day  = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+
+        events = []
+
+        def _event(title, currency, impact, h, m=30):
+            t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            return {"title":title, "currency":currency, "impact":impact, "time":t}
+
+        # ── Daily high-impact windows (always block) ─────────────
+        # London open volatility: 07:00-08:30 UTC
+        if 6 <= hour <= 8:
+            events.append(_event("London Open Volatility", "EUR", "high", 8, 0))
+
+        # NY open + overlap: 12:30-14:00 UTC (most USD data releases)
+        if 12 <= hour <= 14:
+            events.append(_event("NY Open / USD Data Window", "USD", "high", 13, 30))
+
+        # ── Weekly recurring events ───────────────────────────────
+        # Monday: Asian/European open gaps
+        if day == 0 and hour <= 2:
+            events.append(_event("Monday Market Open", "USD", "medium", 0, 0))
+
+        # Tuesday: RBA, specific USD data
+        if day == 1 and hour == 13:
+            events.append(_event("USD Tuesday Data", "USD", "medium", 13, 30))
+
+        # Wednesday: ADP Employment, FOMC minutes/decisions
+        if day == 2:
+            if hour == 12:
+                events.append(_event("ADP Employment / USD Data", "USD", "high", 12, 15))
+            if 18 <= hour <= 20:
+                events.append(_event("FOMC Window (Wednesdays)", "USD", "high", 19, 0))
+
+        # Thursday: ECB, Jobless Claims, GBP data
+        if day == 3:
+            if hour == 12:
+                events.append(_event("Jobless Claims / USD Data", "USD", "high", 12, 30))
+            if hour == 12 and minute < 30:
+                events.append(_event("ECB Decision Window", "EUR", "high", 12, 15))
+
+        # Friday: NFP (first Friday usually, but block every Friday)
+        if day == 4:
+            if hour == 12:
+                events.append(_event("NFP / Payrolls Friday", "USD", "high", 12, 30))
+
+        return events
+
+    def get_upcoming_events(self, hours: int = 4) -> list:
+        """Return upcoming high-impact events in next N hours — for dashboard."""
+        now    = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=hours)
+        events = self._get_events()
+        upcoming = []
+        for e in events:
+            t = e.get("time")
+            if t and now <= t <= cutoff:
+                mins_away = (t - now).total_seconds() / 60
+                upcoming.append({
+                    "title":     e["title"],
+                    "currency":  e["currency"],
+                    "impact":    e["impact"],
+                    "time_utc":  t.strftime("%H:%M UTC"),
+                    "mins_away": round(mins_away)
+                })
+        return sorted(upcoming, key=lambda x: x["mins_away"])
+
+    def disable(self):
+        self._enabled = False
+        log.info("[NEWS] News filter disabled")
+
+    def enable(self):
+        self._enabled = True
+        log.info("[NEWS] News filter enabled")
 
 
-# ─────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
-    log.info(f"[SERVER] Starting Flask on port {port}")
-    # Use threaded=True so bot thread and Flask run together
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True, use_reloader=False)
-
-# Gunicorn entry point
-application = app
+# Global instance
+news_filter = NewsFilter()
