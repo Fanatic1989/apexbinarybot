@@ -337,17 +337,14 @@ def _build(market, direction, base_conf, candles):
     if score >= 3:
         result["confirmed"]  = True
         result["confidence"] = "high"
-    elif score >= 2:
+    elif score >= 2 and base_conf == "high":
+        # Score 2 only allowed if strategy itself is HIGH confidence
+        # (RSI reversal and BB bounce qualify)
         result["confirmed"]  = True
         result["confidence"] = "normal"
     else:
-        # Score 0-1: only allow if base is high AND RSI extreme reversal
-        # These are the most statistically reliable signals
-        if base_conf == "high":
-            result["confirmed"]  = True
-            result["confidence"] = "normal"
-        else:
-            result["confirmed"]  = False
+        # Everything else rejected — quality over quantity
+        result["confirmed"]  = False
     return result
 
 def _no_signal(market):
