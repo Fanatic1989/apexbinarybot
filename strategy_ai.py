@@ -19,11 +19,13 @@ log = logging.getLogger(__name__)
 class StrategyTracker:
     FILE = "strategy_performance.json"
     STRATEGIES = [
-        "rsi_reversal",
-        "bb_bounce",
-        "ema_triple",
-        "false_breakout",
-        "momentum_streak",
+        "rsi_reversal",      # Synthetic — RSI extreme mean reversion
+        "bb_bounce",         # Synthetic — Bollinger Band bounce
+        "ema_triple",        # Synthetic — EMA alignment (trending)
+        "false_breakout",    # Synthetic — false breakout reversal
+        "momentum_streak",   # Synthetic — momentum continuation
+        "pivot_stochrsi",    # Forex — Pivot Point + Stoch RSI
+        "fvg_retest",        # Commodity — FVG retest (Smart Money)
     ]
 
     def __init__(self):
