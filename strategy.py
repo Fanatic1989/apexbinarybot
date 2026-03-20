@@ -184,17 +184,24 @@ def _synthetic_regime(df, candles, market):
     # AI selects strategy, but regime overrides selection
     chosen = selector.select_strategy(candles, market)
 
-    # Regime-based strategy override
+    log.info(f"[AI] {market} regime:{regime} strategy:{chosen}")
+
+    # ── ALWAYS check BB first — highest priority signal ──────────
+    # BB bounce/scalp works in ALL regimes when price is at extremes
+    # Don't let strategy selection miss these high-probability setups
+    bb_result = _synth_bb_scalp(df, candles, market)
+    if bb_result and bb_result.get("direction") != "NONE":
+        bb_result["strategy"] = "bb_bounce"
+        log.info(f"[SYNTH] {market} BB signal fires — overriding {chosen}")
+        return bb_result
+
+    # ── Then run AI-selected strategy ────────────────────────────
     if regime == "ranging":
-        # Ranging: BB bounce and RSI reversal work best
         if chosen not in ("bb_bounce", "rsi_reversal", "false_breakout"):
-            chosen = "bb_bounce"
+            chosen = "rsi_reversal"
     elif regime in ("trending", "breakout"):
-        # Trending/breakout: momentum and EMA work best
         if chosen not in ("momentum_streak", "ema_triple", "false_breakout"):
             chosen = "momentum_streak"
-
-    log.info(f"[AI] {market} regime:{regime} strategy:{chosen}")
 
     if chosen in ("rsi_reversal", "bb_bounce"):
         result = _synth_bb_scalp(df, candles, market)
@@ -202,10 +209,6 @@ def _synthetic_regime(df, candles, market):
         result = _synth_false_breakout(df, candles, market)
     else:
         result = _synth_momentum(df, candles, market)
-
-    # Fallback if nothing found
-    if not result or result.get("direction") == "NONE":
-        result = _synth_bb_scalp(df, candles, market)
 
     if result and result.get("direction") != "NONE":
         result["strategy"] = chosen
