@@ -220,7 +220,7 @@ def _parallel_scan(markets):
     _scan_market(best_market, best_signal)
 
 
-def _scan_market(market):
+def _scan_market(market, signal=None):
     global _session_trades
 
     # Cooldown check
@@ -233,26 +233,12 @@ def _scan_market(market):
         return
 
     try:
-        candles = get_candles(market)
-        if not candles or len(candles) < 40:
-            log.warning(f"[{market}] Insufficient candles ({len(candles) if candles else 0})")
-            return
-
-        signal = analyze_market(candles, market)
-
-        # Update last_signals for dashboard
-        import bot as _b
-        _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
-        if signal:
-            _b.last_signals.append({
-                "market":     market,
-                "direction":  signal.get("direction", "NONE"),
-                "confidence": signal.get("confidence", "low"),
-                "strategy":   signal.get("strategy", "—"),
-                "timestamp":  datetime.utcnow().strftime("%H:%M:%S")
-            })
-            if len(_b.last_signals) > 40:
-                _b.last_signals = _b.last_signals[-40:]
+        # Use pre-analyzed signal if provided, otherwise analyze now
+        if signal is None:
+            candles = get_candles(market)
+            if not candles or len(candles) < 40:
+                return
+            signal = analyze_market(candles, market)
 
         if not signal or signal.get("direction") == "NONE":
             return
