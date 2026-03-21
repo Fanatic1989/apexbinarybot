@@ -272,26 +272,20 @@ def _synth_ranging(df, candles, market, adx_val):
     rsi_val = float(_rsi(close).iloc[-1])
     stoch   = _stoch_rsi(close)
 
-    # RSI extreme reversal
+    # RSI extreme reversal — need BOTH RSI extreme AND actively turning
     rsi_series = _rsi(close)
     rsi_prev   = float(rsi_series.iloc[-2])
+    rsi_prev2  = float(rsi_series.iloc[-3])
+    rsi_turning_up   = rsi_val > rsi_prev > rsi_prev2  # consecutive rising
+    rsi_turning_down = rsi_val < rsi_prev < rsi_prev2  # consecutive falling
 
-    if rsi_val <= 25 and rsi_val > rsi_prev - 0.5:  # oversold + turning
-        log.info(f"[SYNTH] {market} CALL | RSI reversal {rsi_val:.1f}")
+    if rsi_val <= 22 and rsi_turning_up and stoch and stoch < 25:
+        log.info(f"[SYNTH] {market} CALL | RSI reversal {rsi_val:.1f} turning up")
         return _build(market, "CALL", "high", candles, "rsi_reversal")
 
-    if rsi_val >= 75 and rsi_val < rsi_prev + 0.5:  # overbought + turning
-        log.info(f"[SYNTH] {market} PUT | RSI reversal {rsi_val:.1f}")
+    if rsi_val >= 78 and rsi_turning_down and stoch and stoch > 75:
+        log.info(f"[SYNTH] {market} PUT | RSI reversal {rsi_val:.1f} turning down")
         return _build(market, "PUT", "high", candles, "rsi_reversal")
-
-    # Stoch RSI extremes
-    if stoch is not None:
-        if stoch < 20:
-            log.info(f"[SYNTH] {market} CALL | StochRSI oversold {stoch:.1f}")
-            return _build(market, "CALL", "normal", candles, "rsi_reversal")
-        if stoch > 80:
-            log.info(f"[SYNTH] {market} PUT | StochRSI overbought {stoch:.1f}")
-            return _build(market, "PUT", "normal", candles, "rsi_reversal")
 
     return _no_signal(market)
 
