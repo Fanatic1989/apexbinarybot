@@ -626,18 +626,15 @@ def _build(market, direction, base_conf, candles, strategy_name):
     # High base confidence (strong setup) needs score >= 2
     # Normal base confidence needs score >= 3
     # This filters out all marginal signals
+    # Sniper now uses 3-point scale (v5)
     if base_conf == "high":
-        if score >= 3:
+        if score >= 2:
             result["confirmed"]  = True
-            result["confidence"] = "high"
-        elif score >= 2:
-            result["confirmed"]  = True
-            result["confidence"] = "normal"
+            result["confidence"] = "high" if score == 3 else "normal"
         else:
             result["confirmed"]  = False
     else:
-        # Normal strategies need strong sniper confirmation
-        if score >= 3:
+        if score >= 2:
             result["confirmed"]  = True
             result["confidence"] = "normal"
         else:
