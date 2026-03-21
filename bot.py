@@ -144,24 +144,80 @@ def _run_session(name, max_trades, max_hours):
 
 
 def _parallel_scan(markets):
-    """Scan all markets simultaneously — each in its own thread."""
+    """
+    Scan all markets simultaneously for signals.
+    Collect ALL signals then trade only the SINGLE best one.
+    This prevents multiple simultaneous trades that compound losses.
+    """
+    signals_found = []
+    signals_lock  = threading.Lock()
+
+    def _scan_for_signal(market):
+        """Scan market and return signal if found — don't trade yet."""
+        try:
+            if time.time() < _market_paused.get(market, 0):
+                return
+            from news_filter import news_filter
+            blocked, reason = news_filter.is_news_time(market)
+            if blocked:
+                log.info(f"[{market}] 📰 {reason}")
+                return
+            candles = get_candles(market)
+            if not candles or len(candles) < 40:
+                return
+            signal = analyze_market(candles, market)
+            # Update last_signals for dashboard
+            import bot as _b
+            _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
+            if signal and signal.get("direction") != "NONE":
+                _b.last_signals.append({
+                    "market":     market,
+                    "direction":  signal.get("direction","NONE"),
+                    "confidence": signal.get("confidence","low"),
+                    "strategy":   signal.get("strategy","—"),
+                    "timestamp":  datetime.utcnow().strftime("%H:%M:%S")
+                })
+                if len(_b.last_signals) > 40:
+                    _b.last_signals = _b.last_signals[-40:]
+            if not signal or not signal.get("confirmed", False):
+                return
+            if signal.get("direction") == "NONE":
+                return
+            # Score signals: HIGH=2, NORMAL=1
+            score = 2 if signal.get("confidence") == "high" else 1
+            with signals_lock:
+                signals_found.append((score, market, signal, candles))
+        except Exception as e:
+            log.error(f"[{market}] Scan error: {e}")
+
+    # Scan all markets simultaneously
     max_workers = min(8, len(markets))
     with ThreadPoolExecutor(max_workers=max_workers,
                             thread_name_prefix="Scan") as ex:
-        futures = {ex.submit(_scan_market, m): m for m in markets}
-        # Timeout = longest possible trade settlement (15min forex + 5min buffer)
-        done, pending = [], []
+        futures = {ex.submit(_scan_for_signal, m): m for m in markets}
         try:
-            for fut in as_completed(futures, timeout=1200):
-                try:
-                    fut.result()
+            for fut in as_completed(futures, timeout=60):
+                try: fut.result()
                 except Exception as e:
                     log.error(f"[{futures[fut]}] Thread error: {e}")
         except Exception as e:
-            pending = [m for fut, m in futures.items() if not fut.done()]
-            if pending:
-                log.warning(f"[BOT] {len(pending)} markets still settling: "
-                            f"{pending} — this is normal for 15min forex trades")
+            log.warning(f"[BOT] Scan timeout: {e}")
+
+    if not signals_found:
+        log.debug("[BOT] No confirmed signals this scan")
+        return
+
+    # Pick the single best signal (highest confidence)
+    signals_found.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_market, best_signal, best_candles = signals_found[0]
+
+    log.info(f"[BOT] {len(signals_found)} signal(s) found — "
+             f"trading best: {best_market} "
+             f"{best_signal.get('direction')} "
+             f"{best_signal.get('confidence','').upper()}")
+
+    # Trade ONLY the best signal
+    _scan_market(best_market, best_signal)
 
 
 def _scan_market(market):
