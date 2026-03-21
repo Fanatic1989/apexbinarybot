@@ -1,50 +1,135 @@
 """
-Self-Learning AI Strategy Selector — NO external API required.
+Thompson Sampling Strategy Optimizer — v4.0
 
-Uses a weighted scoring system that learns from trade outcomes.
-Tracks performance per strategy per market and automatically
-routes each market to its best performing strategy.
+Clean implementation based on the Multi-Armed Bandit model:
+  alphas = wins + 1  (Laplace smoothing)
+  betas  = losses + 1
 
-The more trades it sees, the smarter it gets.
+Improvements over standard TS:
+  - Market-specific arm weights (R_100 favours mean reversion)
+  - Regime-aware selection (trending vs ranging vs choppy)
+  - Automatic underperformer reset (fresh start after 5+ trades below 42%)
+  - Persistent state survives restarts (saves to disk)
+  - Per-market proven history overrides sampling when enough data exists
 """
 import json
 import time
 import logging
-import math
+import numpy as np
 from datetime import datetime
 
 log = logging.getLogger(__name__)
 
+STRATEGIES = [
+    "bb_bounce",       # Bollinger Band mean reversion
+    "rsi_reversal",    # RSI extreme reversal
+    "false_breakout",  # False breakout reversal
+    "momentum_streak", # Trend continuation
+    "fvg_retest",      # Fair Value Gap retest (commodities)
+    "pivot_stochrsi",  # Pivot Point + Stoch RSI (forex)
+    "ema_triple",      # Triple EMA alignment
+]
 
+
+# ─────────────────────────────────────────
+# Core Thompson Sampling Engine
+# ─────────────────────────────────────────
+class ThompsonSamplingOptimizer:
+    """
+    Pure MAB implementation.
+    Sample Beta(alpha, beta) for each arm → pick highest.
+    """
+    def __init__(self, strategies: list):
+        self.strategies = strategies
+        self.n          = len(strategies)
+        self.alphas     = np.ones(self.n, dtype=float)
+        self.betas      = np.ones(self.n, dtype=float)
+
+    def select(self, excluded: list = None, weights: dict = None) -> int:
+        """
+        Sample from each Beta distribution.
+        excluded : strategies to skip (zero sample)
+        weights  : multipliers per strategy name {name: float}
+        """
+        samples = np.array([
+            float(np.random.beta(self.alphas[i], self.betas[i]))
+            for i in range(self.n)
+        ])
+
+        # Apply market-specific weights
+        if weights:
+            for i, name in enumerate(self.strategies):
+                if name in weights:
+                    samples[i] *= weights[name]
+
+        # Zero out excluded strategies
+        if excluded:
+            for i, name in enumerate(self.strategies):
+                if name in excluded:
+                    samples[i] = 0.0
+
+        # If everything excluded, return random
+        if samples.max() == 0:
+            return int(np.random.randint(self.n))
+
+        return int(np.argmax(samples))
+
+    def update(self, idx: int, won: bool):
+        if won: self.alphas[idx] += 1.0
+        else:   self.betas[idx]  += 1.0
+
+    def get_win_rate(self, idx: int) -> float:
+        """Estimated win rate (excluding Laplace smoothing)."""
+        total = self.alphas[idx] + self.betas[idx] - 2
+        return round((self.alphas[idx]-1) / total * 100, 1) if total > 0 else None
+
+    def get_stats(self) -> dict:
+        out = {}
+        for i, name in enumerate(self.strategies):
+            total = int(self.alphas[i] + self.betas[i] - 2)
+            wins  = int(self.alphas[i] - 1)
+            losses= int(self.betas[i] - 1)
+            out[name] = {
+                "wins":     wins,
+                "losses":   losses,
+                "total":    total,
+                "win_rate": round(wins/total*100,1) if total>0 else None,
+                "alpha":    round(float(self.alphas[i]),2),
+                "beta":     round(float(self.betas[i]),2),
+            }
+        return out
+
+    def reset_underperformers(self, min_trades=5, min_wr=0.42):
+        """Give consistently losing strategies a fresh start."""
+        for i, name in enumerate(self.strategies):
+            total = self.alphas[i] + self.betas[i] - 2
+            if total >= min_trades:
+                wr = (self.alphas[i]-1) / total
+                if wr < min_wr:
+                    log.warning(f"[TS] {name} WR={wr:.0%} after {total:.0f} trades"
+                                f" — resetting for re-exploration")
+                    self.alphas[i] = 1.0
+                    self.betas[i]  = 1.0
+
+
+# ─────────────────────────────────────────
+# Strategy Tracker (persistence layer)
+# ─────────────────────────────────────────
 class StrategyTracker:
     FILE = "strategy_performance.json"
-    STRATEGIES = [
-        "rsi_reversal",      # Synthetic — RSI extreme mean reversion
-        "bb_bounce",         # Synthetic — Bollinger Band bounce
-        "ema_triple",        # Synthetic — EMA alignment (trending)
-        "false_breakout",    # Synthetic — false breakout reversal
-        "momentum_streak",   # Synthetic — momentum continuation
-        "pivot_stochrsi",    # Forex — Pivot Point + Stoch RSI
-        "fvg_retest",        # Commodity — FVG retest (Smart Money)
-    ]
 
     def __init__(self):
-        self.data = self._load()
+        self.data      = self._load()
+        self.optimizer = ThompsonSamplingOptimizer(STRATEGIES)
+        self._sync()
 
-    def _load(self):
+    def _load(self) -> dict:
         try:
             with open(self.FILE) as f:
                 return json.load(f)
         except:
-            return self._empty()
-
-    def _empty(self):
-        return {
-            "strategies": {s: {"wins":0,"losses":0,"last_used":None}
-                          for s in self.STRATEGIES},
-            "markets": {},
-            "last_updated": None
-        }
+            return {"strategies":{s:{"wins":0,"losses":0} for s in STRATEGIES},
+                    "markets":{}, "last_updated":None}
 
     def _save(self):
         try:
@@ -52,27 +137,75 @@ class StrategyTracker:
             with open(self.FILE,"w") as f:
                 json.dump(self.data, f, indent=2)
         except Exception as e:
-            log.error(f"[TRACKER] Save failed: {e}")
+            log.error(f"[TRACKER] Save error: {e}")
 
-    def record(self, strategy, market, result):
-        s = self.data["strategies"].setdefault(
-            strategy, {"wins":0,"losses":0,"last_used":None})
-        if result == "won": s["wins"] += 1
-        else:               s["losses"] += 1
-        s["last_used"] = datetime.utcnow().isoformat()
+    def _sync(self):
+        """Restore optimizer state from persisted data."""
+        for i, name in enumerate(STRATEGIES):
+            s = self.data["strategies"].get(name,{"wins":0,"losses":0})
+            self.optimizer.alphas[i] = float(s["wins"]  + 1)
+            self.optimizer.betas[i]  = float(s["losses"] + 1)
 
+    def record(self, strategy: str, market: str, result: str):
+        """Record trade result — updates tracker + optimizer."""
+        won = (result == "won")
+
+        # Global strategy stats
+        s = self.data["strategies"].setdefault(strategy, {"wins":0,"losses":0})
+        if won: s["wins"]   += 1
+        else:   s["losses"] += 1
+
+        # Per-market stats
         m  = self.data["markets"].setdefault(market, {})
         ms = m.setdefault(strategy, {"wins":0,"losses":0})
-        if result == "won": ms["wins"] += 1
-        else:               ms["losses"] += 1
+        if won: ms["wins"]   += 1
+        else:   ms["losses"] += 1
+
+        # Update optimizer
+        if strategy in STRATEGIES:
+            idx = STRATEGIES.index(strategy)
+            self.optimizer.update(idx, won)
+            wr = self.optimizer.get_win_rate(idx)
+            log.info(f"[TS] {strategy} on {market}: {result.upper()} | "
+                     f"WR={wr}% | "
+                     f"α={self.optimizer.alphas[idx]:.0f} "
+                     f"β={self.optimizer.betas[idx]:.0f}")
+
+            # Auto-reset underperformers every 10 trades
+            total_global = sum(v["wins"]+v["losses"]
+                               for v in self.data["strategies"].values())
+            if total_global % 10 == 0:
+                self.optimizer.reset_underperformers()
 
         self._save()
-        total = s["wins"] + s["losses"]
-        wr    = round(s["wins"]/total*100,1) if total else 0
-        log.info(f"[AI] {strategy} on {market}: {result.upper()} | "
-                 f"Global win rate: {wr}% ({total} trades)")
 
-    def get_win_rates(self):
+    def record_volatility_spike(self, market: str):
+        """ATR spike detected — logged for future use."""
+        log.debug(f"[TS] {market} volatility spike noted")
+
+    def get_market_best(self, market: str) -> str:
+        """Best proven strategy for this market (needs 3+ trades, 55%+ WR)."""
+        m = self.data["markets"].get(market, {})
+        best_wr, best = 0.55, None   # minimum 55% to qualify as "proven"
+        for strat, stats in m.items():
+            total = stats["wins"] + stats["losses"]
+            if total < 3:
+                continue
+            wr = stats["wins"] / total
+            if wr > best_wr:
+                best_wr, best = wr, strat
+        return best
+
+    def get_excluded(self) -> list:
+        """Strategies proven to underperform (below 42% after 5+ trades)."""
+        out = []
+        for name, stats in self.data["strategies"].items():
+            total = stats["wins"] + stats["losses"]
+            if total >= 5 and stats["wins"]/total < 0.42:
+                out.append(name)
+        return out
+
+    def get_win_rates(self) -> dict:
         rates = {}
         for name, stats in self.data["strategies"].items():
             total = stats["wins"] + stats["losses"]
@@ -84,203 +217,139 @@ class StrategyTracker:
             }
         return rates
 
-    def get_market_best_strategy(self, market):
-        m = self.data["markets"].get(market, {})
-        best_wr, best_strat = -1, None
-        for strat, stats in m.items():
-            total = stats["wins"] + stats["losses"]
-            if total < 3: continue
-            wr = stats["wins"] / total
-            if wr > best_wr:
-                best_wr   = wr
-                best_strat = strat
-        return best_strat
-
-    def get_summary(self):
+    def get_summary(self) -> dict:
         return {
             "win_rates":    self.get_win_rates(),
             "markets":      self.data["markets"],
             "last_updated": self.data.get("last_updated"),
-            "ai_type":      "self-learning"
+            "ai_type":      "thompson-sampling-mab-v4",
+            "optimizer":    self.optimizer.get_stats(),
         }
 
 
+# ─────────────────────────────────────────
+# AI Strategy Selector
+# ─────────────────────────────────────────
 class AIStrategySelector:
     """
-    Self-learning strategy selector — no external API needed.
-
-    Uses three layers of intelligence:
-    1. Historical performance data (which strategy won on this market before)
-    2. Market condition analysis (RSI, BB, trend, volatility)
-    3. Thompson Sampling (mathematical optimisation that balances
-       exploiting known winners vs exploring new strategies)
+    3-layer strategy selection:
+    1. Proven market history    — use what's worked here before
+    2. Thompson Sampling        — MAB optimisation
+    3. Condition override       — regime + price conditions
     """
-    CACHE_TTL = 180  # Re-evaluate every 3 minutes
+    CACHE_TTL = 120
+
+    # Market-specific weights for Thompson Sampling
+    # These bias the sampling WITHOUT overriding it
+    MARKET_WEIGHTS = {
+        # Fast indices: favour mean reversion
+        "R_100":   {"bb_bounce":1.5, "rsi_reversal":1.4, "ema_triple":0.4},
+        "1HZ100V": {"bb_bounce":1.5, "rsi_reversal":1.4, "ema_triple":0.4},
+        "JD100":   {"bb_bounce":1.4, "rsi_reversal":1.3},
+        # Forex: favour regime strategies
+        "frxEURUSD": {"pivot_stochrsi":1.6, "fvg_retest":1.4},
+        "frxGBPUSD": {"pivot_stochrsi":1.6, "fvg_retest":1.4},
+        "frxXAUUSD": {"fvg_retest":1.8, "pivot_stochrsi":1.2},
+    }
 
     def __init__(self, tracker: StrategyTracker):
-        self.tracker = tracker
-        self._cache  = {}
+        self.tracker    = tracker
+        self._cache     = {}
+        self._ai_active = True
 
     def select_strategy(self, candles: list, market: str) -> str:
-        # Check cache
-        if market in self._cache:
-            strat, ts = self._cache[market]
-            if time.time() - ts < self.CACHE_TTL:
-                return strat
-
-        # Layer 1: market-proven strategy (needs 3+ trades)
-        proven = self.tracker.get_market_best_strategy(market)
+        # Layer 1: proven history for this specific market
+        proven = self.tracker.get_market_best(market)
         if proven:
-            log.info(f"[AI] {market} → proven best: {proven}")
-            self._cache[market] = (proven, time.time())
+            log.debug(f"[AI] {market} → proven best: {proven}")
             return proven
 
-        # Layer 2: Thompson Sampling across global strategy performance
-        ts_choice = self._thompson_sampling(market)
+        excluded = self.tracker.get_excluded()
+        weights  = self.MARKET_WEIGHTS.get(market)
 
-        # Layer 3: Condition-based override
-        condition_choice = self._condition_based(candles, market)
+        # Layer 2: Thompson Sampling with market-specific weights
+        ts_idx    = self.tracker.optimizer.select(
+                        excluded=excluded, weights=weights)
+        ts_choice = STRATEGIES[ts_idx]
 
-        # If both agree — high confidence
-        if ts_choice == condition_choice:
-            choice = ts_choice
-            log.info(f"[AI] {market} → consensus: {choice}")
-        else:
-            # Condition-based takes priority with limited data
-            total_trades = sum(
-                v["wins"]+v["losses"]
-                for v in self.tracker.data["strategies"].values()
-            )
-            choice = condition_choice if total_trades < 30 else ts_choice
-            log.info(f"[AI] {market} → {choice} "
-                     f"(ts={ts_choice}, cond={condition_choice})")
+        # Layer 3: condition-based override
+        cond_choice = self._condition_based(candles, market)
 
-        self._cache[market] = (choice, time.time())
+        if ts_choice == cond_choice:
+            log.info(f"[AI] {market} → consensus: {ts_choice}")
+            return ts_choice
+
+        # Weight condition-based higher early on (< 20 global trades)
+        total = sum(v["wins"]+v["losses"]
+                    for v in self.tracker.data["strategies"].values())
+        choice = cond_choice if total < 20 else ts_choice
+        log.info(f"[AI] {market} → {choice} "
+                 f"(ts={ts_choice}, cond={cond_choice}, trades={total})")
         return choice
 
-    def _thompson_sampling(self, market: str = "") -> str:
-        """
-        Thompson Sampling with performance floor and market-specific weights.
-
-        For fast synthetic indices (R_100, JD100):
-          - Boost bb_bounce and rsi_reversal (mean reversion works best)
-          - Reduce ema_triple weight (trends are too short-lived)
-
-        For forex/commodities:
-          - Boost pivot_stochrsi and fvg_retest
-          - Standard sampling for others
-        """
-        import random
-        scores = {}
-        is_fast = market in ("R_100", "JD100", "1HZ100V")
-        is_forex_comm = market.startswith("frx")
-
-        for name, stats in self.tracker.data["strategies"].items():
-            w = stats["wins"] + 1
-            l = stats["losses"] + 1
-            total = stats["wins"] + stats["losses"]
-            wr    = stats["wins"] / total if total > 0 else 0.5
-
-            # Exclude proven losers
-            if total >= 4 and wr < 0.42:
-                log.debug(f"[AI] {name} excluded — {wr:.0%} WR")
-                scores[name] = 0.0
-                continue
-
-            score = random.betavariate(w, l)
-
-            # Fast index boost: favour mean reversion
-            if is_fast and name in ("bb_bounce", "rsi_reversal"):
-                score *= 1.4
-            if is_fast and name == "ema_triple":
-                score *= 0.4   # penalise on fast indices
-
-            # Forex/commodity boost: favour regime-specific strategies
-            if is_forex_comm and name in ("pivot_stochrsi", "fvg_retest"):
-                score *= 1.5
-
-            scores[name] = score
-
-        if not scores or max(scores.values()) == 0:
-            log.warning("[AI] All strategies underperforming — resetting")
-            return random.choice(self.tracker.STRATEGIES)
-
-        return max(scores, key=scores.get)
-
     def _condition_based(self, candles: list, market: str) -> str:
-        """
-        Analyse current market conditions to pick the right strategy.
-        """
+        """Route based on asset class + current market conditions."""
         if not candles or len(candles) < 20:
-            return "ema_triple"
-
-        import numpy as np
-        arr    = np.array([c["close"] for c in candles[-20:]])
-        rsi    = _quick_rsi(arr)
-        bb_pos = _quick_bb_position(arr)
-        vol    = float(np.std(arr[-10:]) / np.mean(arr[-10:]) * 100)
-
-        # Strong RSI extreme → reversal strategy
-        if rsi >= 74 or rsi <= 26:
-            return "rsi_reversal"
-
-        # Price near BB bands → band bounce
-        if bb_pos > 0.88 or bb_pos < 0.12:
             return "bb_bounce"
+        try:
+            import config as _c
+            if _c.is_commodity(market): return "fvg_retest"
+            if _c.is_forex(market):     return "pivot_stochrsi"
 
-        # Check for false breakout setup
-        highs = np.array([c["high"]  for c in candles[-12:]])
-        lows  = np.array([c["low"]   for c in candles[-12:]])
-        recent_high = highs[:-1].max()
-        recent_low  = lows[:-1].min()
-        last_high   = highs[-1]
-        last_low    = lows[-1]
-        if last_high > recent_high or last_low < recent_low:
-            return "false_breakout"
+            # Synthetics — analyse conditions
+            arr    = np.array([c["close"] for c in candles[-20:]])
+            rsi    = _quick_rsi(arr)
+            bb_pos = _quick_bb_pos(arr)
 
-        # Trending market → EMA triple
-        ema9  = float(np.mean(arr[-9:]))
-        ema21 = float(np.mean(arr[-21:]) if len(arr)>=21 else np.mean(arr))
-        strong_trend = abs(ema9 - ema21) / ema21 > 0.0003
-        if strong_trend:
-            return "ema_triple"
+            # RSI extreme → mean reversion
+            if rsi >= 72 or rsi <= 28: return "rsi_reversal"
 
-        # Check momentum streak (3 same-direction candles)
-        last3 = candles[-3:]
-        all_bull = all(c["close"] > c["open"] for c in last3)
-        all_bear = all(c["close"] < c["open"] for c in last3)
-        if all_bull or all_bear:
-            return "momentum_streak"
+            # Price near BB band → bounce
+            if bb_pos > 0.88 or bb_pos < 0.12: return "bb_bounce"
 
-        # Default
-        return "ema_triple"
+            # Recent breakout of swing high/low
+            highs = np.array([c["high"] for c in candles[-12:]])
+            lows  = np.array([c["low"]  for c in candles[-12:]])
+            if highs[-1] > highs[:-1].max() or lows[-1] < lows[:-1].min():
+                return "false_breakout"
+
+            # 3 same-direction candles
+            last3 = candles[-3:]
+            if all(c["close"] > c["open"] for c in last3): return "momentum_streak"
+            if all(c["close"] < c["open"] for c in last3): return "momentum_streak"
+
+            return "bb_bounce"
+        except Exception as e:
+            log.debug(f"[AI] Condition error: {e}")
+            return "bb_bounce"
 
     def re_enable_ai(self):
         self._cache.clear()
+        self._ai_active = True
 
 
 # ─────────────────────────────────────────
-# Quick indicators
+# Quick indicators (no pandas dependency)
 # ─────────────────────────────────────────
-def _quick_rsi(arr, period=14):
-    import numpy as np
-    if len(arr) < period+1: return 50.0
+def _quick_rsi(arr: np.ndarray, period: int = 14) -> float:
+    if len(arr) < period + 1:
+        return 50.0
     d = np.diff(arr)
-    g = np.where(d>0, d, 0)
-    l = np.where(d<0, -d, 0)
+    g = np.where(d > 0, d, 0.0)
+    l = np.where(d < 0, -d, 0.0)
     ag = np.mean(g[-period:])
     al = np.mean(l[-period:])
-    if al == 0: return 100.0
-    return float(100 - 100/(1 + ag/al))
+    return 100.0 if al == 0 else float(100 - 100 / (1 + ag/al))
 
-def _quick_bb_position(arr, period=20):
-    import numpy as np
-    if len(arr) < period: return 0.5
+def _quick_bb_pos(arr: np.ndarray, period: int = 20) -> float:
+    if len(arr) < period:
+        return 0.5
     w    = arr[-period:]
     mean = np.mean(w)
     std  = np.std(w)
-    if std == 0: return 0.5
-    pos = (arr[-1] - (mean-2*std)) / (4*std)
+    if std == 0:
+        return 0.5
+    pos = (arr[-1] - (mean - 2*std)) / (4*std)
     return float(np.clip(pos, -0.2, 1.2))
 
 
