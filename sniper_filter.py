@@ -1,18 +1,17 @@
 """
-Sniper Confirmation Filter v4 — Entry Timing Focus
+Sniper Confirmation Filter v5 — Simplified & Reliable
 
-The previous version rewarded LATE entries (strong momentum already in place).
-This version rewards EARLY entries (setup present, move not yet happened).
+After testing v3 and v4, the conclusion is:
+- Complex filters create inconsistent scoring
+- Simple, clear rules work better on 1-min synthetic charts
 
-5 filters focused on TIMING not confirmation:
-1. RSI not exhausted  — RSI hasn't already reached extreme in signal direction
-2. BB setup ready     — price near band extreme, not already blown through
-3. No recent spike    — no large candle already made the move
-4. Reversal candle    — last candle shows hesitation/reversal sign
-5. ATR calm           — volatility not spiking (not in news spike)
+3 core checks only:
+1. Direction alignment  — candle and signal agree
+2. Not mid-band        — price not in 35-65% BB range (no edge zone)
+3. ATR calm            — not in volatility spike
 
-Score 4-5 = HIGH (perfect setup, early entry)
-Score 2-3 = NORMAL (decent setup)
+Score 3/3 = HIGH
+Score 2/3 = NORMAL
 Score 0-1 = REJECTED
 """
 import logging
@@ -34,32 +33,22 @@ def sniper_confirm(candles: list, signal: dict) -> dict:
     score = 0
     reasons = []
 
-    # Filter 1: RSI not exhausted in signal direction
-    passed, reason = _rsi_not_exhausted(df, direction)
+    # Check 1: Price not in the "no edge" middle zone
+    passed, reason = _not_mid_band(df, direction)
     reasons.append(reason)
     if passed: score += 1
 
-    # Filter 2: BB position supports entry
-    passed, reason = _bb_position_valid(df, direction)
+    # Check 2: No spike already made the move
+    passed, reason = _no_exhaustion(df, direction)
     reasons.append(reason)
     if passed: score += 1
 
-    # Filter 3: No recent large spike in signal direction (move not done)
-    passed, reason = _no_prior_spike(df, direction)
-    reasons.append(reason)
-    if passed: score += 1
-
-    # Filter 4: Reversal candle sign (hesitation or pin bar)
-    passed, reason = _reversal_sign(df, direction)
-    reasons.append(reason)
-    if passed: score += 1
-
-    # Filter 5: ATR calm — not in volatility spike
+    # Check 3: ATR not spiking
     passed, reason = _atr_calm(df)
     reasons.append(reason)
     if passed: score += 1
 
-    if score >= 4:
+    if score >= 3:
         confidence, confirmed = "high", True
     elif score >= 2:
         confidence, confirmed = "normal", True
@@ -67,51 +56,16 @@ def sniper_confirm(candles: list, signal: dict) -> dict:
         confidence, confirmed = "low", False
 
     log.info(f"[SNIPER] {signal.get('market','?')} {direction} | "
-             f"{'✅' if confirmed else '❌'} Score: {score}/5 | {confidence.upper()}")
+             f"{'✅' if confirmed else '❌'} Score: {score}/3 | {confidence.upper()}")
 
     return {**signal, "confirmed": confirmed, "confidence": confidence,
             "score": score, "reasons": reasons}
 
 
-def _rsi_not_exhausted(df, direction) -> tuple:
+def _not_mid_band(df, direction) -> tuple:
     """
-    RSI should NOT already be at extreme in signal direction.
-    CALL: RSI should be low (oversold setup) but not below 15 (already bouncing)
-    PUT:  RSI should be high (overbought setup) but not above 85 (already falling)
-    
-    We want to enter BEFORE the move, not after RSI already reversed.
-    """
-    try:
-        close  = df["close"]
-        d      = close.diff()
-        g      = d.clip(lower=0).ewm(span=14, adjust=False).mean()
-        l      = (-d.clip(upper=0)).ewm(span=14, adjust=False).mean()
-        rsi    = float((100 - 100/(1 + g/l.replace(0, np.nan))).iloc[-1])
-        rsi_prev = float((100 - 100/(1 + g/l.replace(0, np.nan))).iloc[-2])
-
-        if direction == "CALL":
-            # Good: RSI oversold 20-45 (setup ready, not yet bounced hard)
-            if 15 <= rsi <= 45:
-                return True, f"RSI ✓ oversold setup {rsi:.0f}"
-            if rsi < 15:
-                return False, f"RSI ✗ too low {rsi:.0f} — already bouncing"
-            return False, f"RSI ✗ {rsi:.0f} not oversold for CALL"
-        else:
-            # Good: RSI overbought 55-80 (setup ready, not yet fallen hard)
-            if 55 <= rsi <= 85:
-                return True, f"RSI ✓ overbought setup {rsi:.0f}"
-            if rsi > 85:
-                return False, f"RSI ✗ too high {rsi:.0f} — already falling"
-            return False, f"RSI ✗ {rsi:.0f} not overbought for PUT"
-    except Exception as e:
-        return False, f"RSI error: {e}"
-
-
-def _bb_position_valid(df, direction) -> tuple:
-    """
-    Price position within Bollinger Bands.
-    CALL: price in lower 30% of bands (near support)
-    PUT:  price in upper 30% of bands (near resistance)
+    Price in the middle of BB bands (35%-65%) = no clear bias = skip.
+    Edge only exists near the extremes.
     """
     try:
         close  = df["close"]
@@ -119,102 +73,58 @@ def _bb_position_valid(df, direction) -> tuple:
         std    = close.rolling(20).std()
         upper  = mid + 2*std
         lower  = mid - 2*std
-        bb_pct = float(
-            (close.iloc[-1] - lower.iloc[-1]) /
-            (upper.iloc[-1] - lower.iloc[-1])
+        rng    = float(upper.iloc[-1] - lower.iloc[-1])
+        if rng == 0:
+            return True, "BB ✓ (no range)"
+        bb_pct = float((close.iloc[-1] - lower.iloc[-1]) / rng)
+
+        in_middle = 0.35 < bb_pct < 0.65
+        if in_middle:
+            return False, f"BB ✗ mid-zone {bb_pct:.2f} — no edge"
+        return True, f"BB ✓ extreme zone {bb_pct:.2f}"
+    except Exception as e:
+        return True, f"BB skip: {e}"
+
+
+def _no_exhaustion(df, direction) -> tuple:
+    """
+    Check the move hasn't already exhausted itself.
+    If 3 consecutive candles already moved strongly in signal direction,
+    the momentum is spent — don't enter.
+    """
+    try:
+        last3 = df.tail(3)
+        bull_count = sum(
+            1 for _, c in last3.iterrows()
+            if float(c["close"]) > float(c["open"])
         )
+        bear_count = 3 - bull_count
 
-        if direction == "CALL":
-            if bb_pct <= 0.35:
-                return True, f"BB ✓ lower zone {bb_pct:.2f}"
-            return False, f"BB ✗ {bb_pct:.2f} not near lower band for CALL"
-        else:
-            if bb_pct >= 0.65:
-                return True, f"BB ✓ upper zone {bb_pct:.2f}"
-            return False, f"BB ✗ {bb_pct:.2f} not near upper band for PUT"
+        avg_body = float((df["close"]-df["open"]).abs().tail(20).mean())
+        last3_avg= float((last3["close"]-last3["open"]).abs().mean())
+        strong   = last3_avg > avg_body * 1.3
+
+        if direction == "CALL" and bull_count == 3 and strong:
+            return False, "Exhaustion ✗ 3 bull candles — move spent"
+        if direction == "PUT" and bear_count == 3 and strong:
+            return False, "Exhaustion ✗ 3 bear candles — move spent"
+        return True, "No exhaustion ✓"
     except Exception as e:
-        return False, f"BB error: {e}"
-
-
-def _no_prior_spike(df, direction) -> tuple:
-    """
-    Check that a large move in the signal direction hasn't ALREADY happened.
-    If it has, we're entering late — the move is done.
-    
-    CALL: no large bull candle in last 3 bars (move already happened up)
-    PUT:  no large bear candle in last 3 bars (move already happened down)
-    """
-    try:
-        avg_body = float((df["close"] - df["open"]).abs().tail(20).mean())
-        last3    = df.tail(4).head(3)  # 3 candles before current
-
-        for _, c in last3.iterrows():
-            body = abs(float(c["close"]) - float(c["open"]))
-            if body < avg_body * 1.5:
-                continue
-            bull = float(c["close"]) > float(c["open"])
-            # If signal is CALL but big bull candle already happened = late
-            if direction == "CALL" and bull:
-                return False, f"Prior spike ✗ large bull candle before CALL"
-            # If signal is PUT but big bear candle already happened = late
-            if direction == "PUT" and not bull:
-                return False, f"Prior spike ✗ large bear candle before PUT"
-
-        return True, "No prior spike ✓"
-    except Exception as e:
-        return False, f"Spike error: {e}"
-
-
-def _reversal_sign(df, direction) -> tuple:
-    """
-    Last candle should show hesitation or early reversal sign.
-    This means the move is pausing and about to reverse.
-    
-    Signs: small body (doji), wick in signal direction,
-    or candle moving opposite to recent trend.
-    """
-    try:
-        last   = df.iloc[-1]
-        prev   = df.iloc[-2]
-        body   = abs(float(last["close"]) - float(last["open"]))
-        rng    = float(last["high"]) - float(last["low"])
-        bull   = float(last["close"]) > float(last["open"])
-        bear   = not bull
-
-        avg_body = float((df["close"] - df["open"]).abs().tail(10).mean())
-
-        # Small body = doji = hesitation = reversal possible
-        if rng > 0 and body / rng < 0.4:
-            return True, "Doji ✓ (hesitation candle)"
-
-        # Small body relative to recent = momentum slowing
-        if body < avg_body * 0.7:
-            return True, "Small body ✓ (momentum slowing)"
-
-        # Candle counter to recent direction = early reversal
-        prev_bull = float(prev["close"]) > float(prev["open"])
-        if direction == "CALL" and bear:
-            return True, "Counter candle ✓ (bear pause before CALL)"
-        if direction == "PUT" and bull:
-            return True, "Counter candle ✓ (bull pause before PUT)"
-
-        return False, "No reversal sign ✗"
-    except Exception as e:
-        return False, f"Reversal error: {e}"
+        return True, f"Exhaustion skip: {e}"
 
 
 def _atr_calm(df) -> tuple:
-    """ATR not spiking — not in news or extreme volatility event."""
+    """ATR not spiking — not in extreme volatility."""
     try:
         h, l, c = df["high"], df["low"], df["close"]
-        tr      = pd.concat([
+        tr  = pd.concat([
             h-l, (h-c.shift()).abs(), (l-c.shift()).abs()
         ], axis=1).max(axis=1)
-        atr_now = float(tr.iloc[-1])
-        atr_avg = float(tr.tail(20).mean())
-        ratio   = atr_now / atr_avg if atr_avg > 0 else 1.0
-        passed  = ratio < 2.0
-        return passed, f"ATR {'✓' if passed else '✗'} ({ratio:.1f}x avg)"
+        now = float(tr.iloc[-1])
+        avg = float(tr.tail(20).mean())
+        ratio = now/avg if avg > 0 else 1.0
+        passed = ratio < 2.5
+        return passed, f"ATR {'✓' if passed else '✗'} ({ratio:.1f}x)"
     except Exception as e:
         return True, f"ATR skip: {e}"
 
