@@ -227,13 +227,25 @@ def _parallel_scan(markets):
                  f"no dominant direction, skipping scan")
         return
 
+    # Require minimum 2 confirmed signals to trade
+    # A lone signal with no corroboration is unreliable
+    if total < 2:
+        log.info(f"[BOT] Only {total} confirmed signal — need 2+ to trade")
+        return
+
     # Only trade in the dominant direction
     if put_count > call_count:
-        dominant = put_signals
+        dominant  = put_signals
         direction = "PUT"
     else:
-        dominant = call_signals
+        dominant  = call_signals
         direction = "CALL"
+
+    # Dominant direction must have clear majority (not 1 vs 1)
+    minority = call_count if direction == "PUT" else put_count
+    if minority >= len(dominant):
+        log.info(f"[BOT] No clear majority: {put_count}P/{call_count}C — skip")
+        return
 
     log.info(f"[BOT] Dominant direction: {direction} "
              f"({len(dominant)}/{total} signals agree)")
