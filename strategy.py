@@ -364,42 +364,72 @@ def _forex_trending(df, candles, market):
 
 def _forex_ranging(df, candles, market):
     """
-    RSI/Stochastic Mean Reversion.
-    Buy at support, sell at resistance when RSI oversold/overbought.
+    RSI/Stochastic Mean Reversion with S/R + Fibonacci confluence.
+    Best entries: RSI extreme + at S/R level + at Fib level = 3 confluences.
     """
     close   = df["close"]
     rsi_val = float(_rsi(close).iloc[-1])
     rsi_prev= float(_rsi(close).iloc[-2])
     stoch   = _stoch_rsi(close)
     pivot   = _calc_pivot(df)
+    sr      = _find_sr_levels(df)
+    fib     = _find_fib_levels(df)
 
     if not pivot:
         return _no_signal(market)
 
     last_close = float(close.iloc[-1])
     pp, r1, s1 = pivot["pp"], pivot["r1"], pivot["s1"]
-    tolerance  = last_close * 0.0004
 
-    # Oversold at support
-    near_support = abs(last_close - s1) < tolerance or abs(last_close - pp) < tolerance
-    if rsi_val < 30 and rsi_val > rsi_prev and near_support:
-        log.info(f"[FOREX] {market} CALL | RSI oversold {rsi_val:.1f} at support")
-        return _build(market, "CALL", "high", candles, "pivot_stochrsi")
+    # Count confluences at current price
+    def count_support_confluences(price):
+        conf = 0
+        if _near_level(price, s1):              conf += 1  # pivot support
+        if _near_level(price, pp):              conf += 1  # pivot point
+        if sr.get("near_support") and _near_level(price, sr["near_support"]): conf += 1
+        if fib.get("at_fib") and fib.get("nearest") and _near_level(price, fib["nearest"]): conf += 1
+        return conf
 
-    # Overbought at resistance
-    near_resist = abs(last_close - r1) < tolerance
-    if rsi_val > 70 and rsi_val < rsi_prev and near_resist:
-        log.info(f"[FOREX] {market} PUT | RSI overbought {rsi_val:.1f} at resistance")
-        return _build(market, "PUT", "high", candles, "pivot_stochrsi")
+    def count_resistance_confluences(price):
+        conf = 0
+        if _near_level(price, r1):              conf += 1
+        if sr.get("near_resistance") and _near_level(price, sr["near_resistance"]): conf += 1
+        if fib.get("at_fib") and fib.get("nearest") and _near_level(price, fib["nearest"]): conf += 1
+        return conf
 
-    # Stoch RSI extremes
-    if stoch is not None:
-        if stoch < 20 and rsi_val < 45:
-            log.info(f"[FOREX] {market} CALL | StochRSI {stoch:.1f} oversold")
+    sup_conf = count_support_confluences(last_close)
+    res_conf = count_resistance_confluences(last_close)
+
+    # CALL: RSI oversold + at support confluence
+    if rsi_val < 32 and rsi_val > rsi_prev:
+        if sup_conf >= 2:
+            log.info(f"[FOREX] {market} CALL | RSI {rsi_val:.1f} + "
+                     f"{sup_conf} support confluences (pivot/S/R/Fib)")
+            return _build(market, "CALL", "high", candles, "pivot_stochrsi")
+        if sup_conf >= 1 and stoch and stoch < 25:
+            log.info(f"[FOREX] {market} CALL | RSI {rsi_val:.1f} + "
+                     f"StochRSI {stoch:.1f} + support level")
             return _build(market, "CALL", "normal", candles, "pivot_stochrsi")
-        if stoch > 80 and rsi_val > 55:
-            log.info(f"[FOREX] {market} PUT | StochRSI {stoch:.1f} overbought")
+
+    # PUT: RSI overbought + at resistance confluence
+    if rsi_val > 68 and rsi_val < rsi_prev:
+        if res_conf >= 2:
+            log.info(f"[FOREX] {market} PUT | RSI {rsi_val:.1f} + "
+                     f"{res_conf} resistance confluences (pivot/S/R/Fib)")
+            return _build(market, "PUT", "high", candles, "pivot_stochrsi")
+        if res_conf >= 1 and stoch and stoch > 75:
+            log.info(f"[FOREX] {market} PUT | RSI {rsi_val:.1f} + "
+                     f"StochRSI {stoch:.1f} + resistance level")
             return _build(market, "PUT", "normal", candles, "pivot_stochrsi")
+
+    # Fibonacci golden zone (61.8%) — highest probability reversal
+    if fib.get("at_fib") and fib.get("nearest_name") in ("0.618", "0.500"):
+        if fib.get("uptrend") and stoch and stoch < 30:
+            log.info(f"[FOREX] {market} CALL | Fib {fib['nearest_name']} golden zone")
+            return _build(market, "CALL", "high", candles, "pivot_stochrsi")
+        if not fib.get("uptrend") and stoch and stoch > 70:
+            log.info(f"[FOREX] {market} PUT | Fib {fib['nearest_name']} golden zone")
+            return _build(market, "PUT", "high", candles, "pivot_stochrsi")
 
     return _no_signal(market)
 
@@ -493,6 +523,159 @@ def _commodity_ranging(df, candles, market):
 
     return _no_signal(market)
 
+
+
+# ─────────────────────────────────────────
+# Support & Resistance + Fibonacci
+# Only used for Forex and Commodities
+# ─────────────────────────────────────────
+def _find_sr_levels(df) -> dict:
+    """
+    Dynamic Support & Resistance from recent swing highs/lows.
+    
+    Method: Find local peaks and troughs in last 100 candles.
+    A swing high = candle higher than 2 candles each side.
+    A swing low  = candle lower than 2 candles each side.
+    Cluster nearby levels (within 0.1%) into single zones.
+    """
+    try:
+        highs  = df["high"].values
+        lows   = df["low"].values
+        closes = df["close"].values
+        n      = len(df)
+
+        swing_highs, swing_lows = [], []
+
+        for i in range(2, min(n-2, 100)):
+            idx = n - 1 - i   # work backwards from current
+            if idx < 2 or idx >= n-2:
+                continue
+            # Swing high: highest of 5 candles centred here
+            if (highs[idx] > highs[idx-1] and highs[idx] > highs[idx-2] and
+                highs[idx] > highs[idx+1] and highs[idx] > highs[idx+2]):
+                swing_highs.append(float(highs[idx]))
+            # Swing low
+            if (lows[idx] < lows[idx-1] and lows[idx] < lows[idx-2] and
+                lows[idx] < lows[idx+1] and lows[idx] < lows[idx+2]):
+                swing_lows.append(float(lows[idx]))
+
+        # Cluster nearby levels
+        def cluster(levels, tolerance=0.001):
+            if not levels:
+                return []
+            levels = sorted(levels)
+            clustered, group = [], [levels[0]]
+            for l in levels[1:]:
+                if (l - group[-1]) / group[-1] < tolerance:
+                    group.append(l)
+                else:
+                    clustered.append(sum(group)/len(group))
+                    group = [l]
+            if group:
+                clustered.append(sum(group)/len(group))
+            return clustered
+
+        resistance = cluster(swing_highs)
+        support    = cluster(swing_lows)
+        last_close = float(closes[-1])
+
+        # Find nearest levels to current price
+        near_res = min(resistance, key=lambda x: abs(x-last_close)) if resistance else None
+        near_sup = min(support,    key=lambda x: abs(x-last_close)) if support    else None
+
+        return {
+            "resistance":  resistance[-3:] if resistance else [],
+            "support":     support[-3:]    if support    else [],
+            "near_resistance": near_res,
+            "near_support":    near_sup,
+            "last_close":      last_close,
+        }
+    except Exception as e:
+        log.debug(f"[S/R] Detection error: {e}")
+        return {}
+
+
+def _find_fib_levels(df) -> dict:
+    """
+    Fibonacci retracement levels from recent significant swing.
+    
+    Finds the most recent significant high-to-low or low-to-high move
+    and calculates 38.2%, 50%, 61.8% retracement levels.
+    These are the most respected levels by institutional traders.
+    """
+    try:
+        # Find recent swing (last 50 candles)
+        recent = df.tail(50)
+        swing_high = float(recent["high"].max())
+        swing_low  = float(recent["low"].min())
+        last_close = float(df["close"].iloc[-1])
+        rng        = swing_high - swing_low
+
+        if rng == 0:
+            return {}
+
+        # Determine trend direction (which way to draw fibs)
+        high_idx = recent["high"].idxmax()
+        low_idx  = recent["low"].idxmin()
+        uptrend  = low_idx < high_idx  # low came first = uptrend
+
+        if uptrend:
+            # Retracement of upward move (fib from low to high)
+            fib_236 = swing_high - rng * 0.236
+            fib_382 = swing_high - rng * 0.382
+            fib_500 = swing_high - rng * 0.500
+            fib_618 = swing_high - rng * 0.618
+            fib_786 = swing_high - rng * 0.786
+        else:
+            # Retracement of downward move (fib from high to low)
+            fib_236 = swing_low + rng * 0.236
+            fib_382 = swing_low + rng * 0.382
+            fib_500 = swing_low + rng * 0.500
+            fib_618 = swing_low + rng * 0.618
+            fib_786 = swing_low + rng * 0.786
+
+        levels = {
+            "0.236": fib_236,
+            "0.382": fib_382,
+            "0.500": fib_500,
+            "0.618": fib_618,
+            "0.786": fib_786,
+        }
+
+        # Find nearest fib level to current price
+        tolerance    = last_close * 0.0005   # 0.05%
+        nearest_fib  = None
+        nearest_dist = float('inf')
+        nearest_name = None
+
+        for name, level in levels.items():
+            dist = abs(last_close - level)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_fib  = level
+                nearest_name = name
+
+        at_fib = nearest_dist < tolerance
+
+        return {
+            "levels":       levels,
+            "nearest":      nearest_fib,
+            "nearest_name": nearest_name,
+            "at_fib":       at_fib,
+            "uptrend":      uptrend,
+            "swing_high":   swing_high,
+            "swing_low":    swing_low,
+        }
+    except Exception as e:
+        log.debug(f"[FIB] Detection error: {e}")
+        return {}
+
+
+def _near_level(price, level, tolerance_pct=0.04) -> bool:
+    """Check if price is within tolerance% of a level."""
+    if level is None or level == 0:
+        return False
+    return abs(price - level) / level < (tolerance_pct / 100)
 
 # ─────────────────────────────────────────
 # INDICATORS
