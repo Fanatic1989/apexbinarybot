@@ -121,8 +121,8 @@ def is_commodity(market: str) -> bool:
 # Risk management
 # ─────────────────────────────────────────
 STAKE_PERCENT        = float(os.getenv("STAKE_PERCENT", 1.0))
-MAX_DAILY_LOSS_PCT   = float(os.getenv("MAX_DAILY_LOSS_PCT", 10.0))
-MAX_CONSECUTIVE_LOSS = int(os.getenv("MAX_CONSECUTIVE_LOSS", 3))
+MAX_DAILY_LOSS_PCT   = float(os.getenv("MAX_DAILY_LOSS_PCT", 5.0))
+MAX_CONSECUTIVE_LOSS = int(os.getenv("MAX_CONSECUTIVE_LOSS", 2))
 DAILY_PROFIT_TARGET  = float(os.getenv("DAILY_PROFIT_TARGET", 5.0))
 PAUSE_DURATION       = int(os.getenv("PAUSE_DURATION", 1800))
 
