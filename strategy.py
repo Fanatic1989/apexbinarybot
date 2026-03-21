@@ -163,32 +163,55 @@ def _synthetic_strategy(df, candles, market, regime):
     log.info(f"[BB] {market} | bb%={bb_pct:.2f} ADX={adx_val:.1f} "
              f"{'BULL' if last_bull else 'BEAR'} engulf={engulfing}")
 
-    # ── TIER 1: Price outside band — strongest signal ────────────
-    if bb_pct > 1.0:
+    # ── Trend alignment check ─────────────────────────────────────
+    # Don't fight the trend — only take BB signals that go WITH
+    # or against the short-term EMA direction
+    e9  = float(_ema(close, 9).iloc[-1])
+    e21 = float(_ema(close, 21).iloc[-1])
+    e50 = float(_ema(close, 50).iloc[-1])
+    short_trend = 1 if e9 > e21 else -1  # short term
+    mid_trend   = 1 if e21 > e50 else -1 # medium term
+
+    # For trending markets: only trade WITH the trend
+    # For ranging markets: trade both directions freely
+    if regime == "trending":
+        put_allowed  = short_trend == -1  # only PUT if trending down
+        call_allowed = short_trend == 1   # only CALL if trending up
+    else:
+        put_allowed  = True   # ranging = both directions OK
+        call_allowed = True
+
+    log.info(f"[BB] {market} | bb%={bb_pct:.2f} ADX={adx_val:.1f} "
+             f"{'BULL' if last_bull else 'BEAR'} engulf={engulfing} "
+             f"trend={'UP' if short_trend==1 else 'DOWN'} "
+             f"put={'✓' if put_allowed else '✗'} call={'✓' if call_allowed else '✗'}")
+
+    # ── TIER 1: Price outside band ───────────────────────────────
+    if bb_pct > 1.0 and put_allowed:
         conf = "high" if bb_pct > 1.05 else "normal"
         log.info(f"[SYNTH] {market} PUT | Above upper band {bb_pct:.2f}")
         return _build(market, "PUT", conf, candles, "bb_bounce")
 
-    if bb_pct < 0.0:
+    if bb_pct < 0.0 and call_allowed:
         conf = "high" if bb_pct < -0.05 else "normal"
         log.info(f"[SYNTH] {market} CALL | Below lower band {bb_pct:.2f}")
         return _build(market, "CALL", conf, candles, "bb_bounce")
 
     # ── TIER 2: Previous candle outside band + reversal ──────────
-    if prev_close > prev_upper and last_bear:
+    if prev_close > prev_upper and last_bear and put_allowed:
         log.info(f"[SYNTH] {market} PUT | Prev above upper + reversal")
         return _build(market, "PUT", "high", candles, "bb_bounce")
 
-    if prev_close < prev_lower and last_bull:
+    if prev_close < prev_lower and last_bull and call_allowed:
         log.info(f"[SYNTH] {market} CALL | Prev below lower + reversal")
         return _build(market, "CALL", "high", candles, "bb_bounce")
 
     # ── TIER 3: Near extremes with confirmation ───────────────────
-    if bb_pct > 0.92 and (engulfing or strong_dir) and last_bear:
+    if bb_pct > 0.92 and (engulfing or strong_dir) and last_bear and put_allowed:
         log.info(f"[SYNTH] {market} PUT | Near upper {bb_pct:.2f}")
         return _build(market, "PUT", "normal", candles, "bb_bounce")
 
-    if bb_pct < 0.08 and (engulfing or strong_dir) and last_bull:
+    if bb_pct < 0.08 and (engulfing or strong_dir) and last_bull and call_allowed:
         log.info(f"[SYNTH] {market} CALL | Near lower {bb_pct:.2f}")
         return _build(market, "CALL", "normal", candles, "bb_bounce")
 
