@@ -628,12 +628,26 @@ def _build(market, direction, base_conf, candles, strategy_name):
     result = sniper_confirm(candles, raw)
     score  = result.get("score", 0)
 
+    # STRICT MODE: quality over quantity
+    # High base confidence (strong setup) needs score >= 2
+    # Normal base confidence needs score >= 3
+    # This filters out all marginal signals
     if base_conf == "high":
-        result["confirmed"]  = True
-        result["confidence"] = "high" if score >= 2 else "normal"
+        if score >= 3:
+            result["confirmed"]  = True
+            result["confidence"] = "high"
+        elif score >= 2:
+            result["confirmed"]  = True
+            result["confidence"] = "normal"
+        else:
+            result["confirmed"]  = False
     else:
-        result["confirmed"]  = score >= 1
-        result["confidence"] = "high" if score >= 2 else "normal"
+        # Normal strategies need strong sniper confirmation
+        if score >= 3:
+            result["confirmed"]  = True
+            result["confidence"] = "normal"
+        else:
+            result["confirmed"]  = False
 
     result["strategy"] = strategy_name
     return result
