@@ -207,16 +207,45 @@ def _parallel_scan(markets):
         log.debug("[BOT] No confirmed signals this scan")
         return
 
-    # Pick the single best signal (highest confidence)
-    signals_found.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_market, best_signal, best_candles = signals_found[0]
+    # ── Dominant direction filter ────────────────────────────────
+    # Count PUT vs CALL signals across all markets
+    # If signals disagree, the market has no clear bias — skip
+    # Only trade when majority of signals agree on direction
+    put_signals  = [s for s in signals_found if s[2].get("direction") == "PUT"]
+    call_signals = [s for s in signals_found if s[2].get("direction") == "CALL"]
+    total        = len(signals_found)
 
-    log.info(f"[BOT] {len(signals_found)} signal(s) found — "
-             f"trading best: {best_market} "
-             f"{best_signal.get('direction')} "
+    put_count  = len(put_signals)
+    call_count = len(call_signals)
+
+    log.info(f"[BOT] {total} signal(s): {put_count} PUT / {call_count} CALL")
+
+    # If signals are split 50/50 — market has no dominant direction
+    # This is the exact pattern causing 50% win rate
+    if total >= 2 and put_count == call_count:
+        log.info(f"[BOT] ⚠️ Signals split {put_count}P/{call_count}C — "
+                 f"no dominant direction, skipping scan")
+        return
+
+    # Only trade in the dominant direction
+    if put_count > call_count:
+        dominant = put_signals
+        direction = "PUT"
+    else:
+        dominant = call_signals
+        direction = "CALL"
+
+    log.info(f"[BOT] Dominant direction: {direction} "
+             f"({len(dominant)}/{total} signals agree)")
+
+    # Pick best signal from dominant direction only
+    dominant.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_market, best_signal, best_candles = dominant[0]
+
+    log.info(f"[BOT] Trading best {direction}: {best_market} "
              f"{best_signal.get('confidence','').upper()}")
 
-    # Trade ONLY the best signal
+    # Trade ONLY the best signal in dominant direction
     _scan_market(best_market, best_signal)
 
 
