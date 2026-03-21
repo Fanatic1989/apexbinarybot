@@ -556,8 +556,18 @@ function toast(msg){
 }
 function buildNewsPanel(events){
   const box = document.getElementById('news-events');
+  if(!box) return;
   if(!events || events.length === 0){
-    box.innerHTML = '<span style="font-size:12px;color:var(--muted)">✅ No high-impact news in next 4 hours — safe to trade</span>';
+    const now = new Date();
+    const utcH = now.getUTCHours();
+    const utcD = now.getUTCDay(); // 0=Sun,5=Fri
+    // Check if we're near a known dangerous window
+    const dangerous = (utcH>=12&&utcH<=14) || (utcH>=7&&utcH<=8) || (utcD===5&&utcH>=12&&utcH<=14);
+    if(dangerous){
+      box.innerHTML = '<span style="font-size:12px;color:#ffb347">⚠️ Potential high-impact window active — bot filtering signals</span>';
+    } else {
+      box.innerHTML = '<span style="font-size:12px;color:var(--green)">✅ No high-impact news — safe to trade</span>';
+    }
     return;
   }
   let h = '';
