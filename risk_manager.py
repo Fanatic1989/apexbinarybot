@@ -1,173 +1,215 @@
+import time
 import logging
-import os
+from datetime import datetime
+
+import config
 
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────
-# Staking Strategy Engine
-# ─────────────────────────────────────────
-# Set STAKING_STRATEGY in Render env vars:
-#   flat        — fixed % of balance (default, safest)
-#   dalembert   — +1 unit after loss, -1 unit after win
-#   oscar       — increment only after a win that completes a profit cycle
-#   strategy1326— 1→3→2→6 unit progression on wins, reset on loss
-#   martingale  — double after loss (DANGEROUS — use only on demo)
-# ─────────────────────────────────────────
 
-STRATEGY = os.getenv("STAKING_STRATEGY", "flat").lower()
-
-
-class StakingEngine:
+class RiskManager:
     """
-    Manages stake sizing based on selected strategy.
-    All strategies respect a hard max cap to protect balance.
+    Centralised risk management for the Deriv bot.
+
+    Tracks:
+      - Account balance and daily P&L
+      - Consecutive losses and pause state
+      - Daily loss limit and profit target
+      - Per-session trade statistics
     """
 
-    def __init__(self, base_stake: float, balance: float):
-        self.base_stake      = base_stake      # starting unit size
-        self.current_stake   = base_stake
-        self.balance         = balance
-        self.strategy        = STRATEGY
+    def __init__(self, starting_balance: float):
+        # ── Balance ──────────────────────────
+        self.starting_balance  = starting_balance
+        self.current_balance   = starting_balance
+        self.daily_start_bal   = starting_balance
 
-        # D'Alembert state
-        self.dalembert_unit  = base_stake
-        self.dalembert_level = 1              # units to bet
+        # ── Session stats ────────────────────
+        self.total_trades      = 0
+        self.total_wins        = 0
+        self.total_losses      = 0
+        self.total_profit      = 0.0
+        self.total_loss_amount = 0.0
 
-        # Oscar's Grind state
-        self.oscar_session_profit = 0.0
-        self.oscar_level          = 1
+        # ── Daily stats ──────────────────────
+        self.daily_profit      = 0.0
+        self.daily_loss        = 0.0
 
-        # 1-3-2-6 state
-        self.sequence_1326   = [1, 3, 2, 6]
-        self.seq_position    = 0
+        # ── Consecutive loss tracking ────────
+        self.consecutive_losses = 0
 
-        # Martingale state
-        self.martingale_stake = base_stake
+        # ── Pause state ──────────────────────
+        self._paused_until     = None   # epoch timestamp
 
-        log.info(f"[STAKING] Strategy: {self.strategy.upper()} | "
-                 f"Base stake: ${base_stake:.2f}")
+        # ── Session start ────────────────────
+        self.session_start     = datetime.utcnow()
 
-    def get_stake(self) -> float:
-        """Return current stake for next trade."""
-        stake = self._raw_stake()
-        # Hard cap: never risk more than 3% of balance
-        max_stake = self.balance * 0.03
-        stake = min(stake, max_stake)
-        stake = max(stake, 0.35)   # Deriv minimum
+        log.info(f"[RISK] Initialised | Balance: ${starting_balance:.2f} | "
+                 f"Stake: {config.STAKE_PERCENT}% | "
+                 f"Daily loss limit: {config.MAX_DAILY_LOSS_PCT}% | "
+                 f"Daily target: {config.DAILY_PROFIT_TARGET}%")
+
+    # ─────────────────────────────────────────
+    # Stake calculation
+    # ─────────────────────────────────────────
+    def calculate_stake(self) -> float:
+        """
+        Return stake amount based on current balance and STAKE_PERCENT.
+        Enforces a minimum stake of $0.35 (Deriv's minimum).
+        """
+        stake = round(self.current_balance * (config.STAKE_PERCENT / 100), 2)
+        stake = max(stake, 0.35)   # Deriv minimum stake
+        stake = min(stake, self.current_balance * 0.02)  # hard cap at 2% even if config says more
         return round(stake, 2)
 
+    # ─────────────────────────────────────────
+    # Record outcomes
+    # ─────────────────────────────────────────
     def record_win(self, profit: float):
-        """Update staking state after a win."""
-        self.balance += profit
-        self._update_balance(profit)
+        """Call this after a winning trade."""
+        self.total_trades      += 1
+        self.total_wins        += 1
+        self.total_profit      += profit
+        self.daily_profit      += profit
+        self.current_balance   += profit
+        self.consecutive_losses = 0   # reset on win
 
-        if self.strategy == "dalembert":
-            # Decrease by 1 unit after win
-            self.dalembert_level = max(1, self.dalembert_level - 1)
-            self.current_stake = self.dalembert_unit * self.dalembert_level
-            log.info(f"[STAKING] D'Alembert WIN → level {self.dalembert_level} "
-                     f"→ stake ${self.current_stake:.2f}")
-
-        elif self.strategy == "oscar":
-            self.oscar_session_profit += profit
-            if self.oscar_session_profit >= self.base_stake:
-                # Completed a profit unit — reset
-                self.oscar_session_profit = 0
-                self.oscar_level = 1
-                log.info(f"[STAKING] Oscar's Grind WIN cycle complete → reset")
-            else:
-                # Increment for next win
-                self.oscar_level = min(self.oscar_level + 1, 8)
-                log.info(f"[STAKING] Oscar's Grind WIN → level {self.oscar_level}")
-
-        elif self.strategy == "strategy1326":
-            self.seq_position += 1
-            if self.seq_position >= len(self.sequence_1326):
-                self.seq_position = 0
-                log.info(f"[STAKING] 1-3-2-6 WIN cycle complete → reset to 1")
-            else:
-                log.info(f"[STAKING] 1-3-2-6 WIN → position {self.seq_position} "
-                         f"(×{self.sequence_1326[self.seq_position]})")
-
-        elif self.strategy == "martingale":
-            # Reset to base after win
-            self.martingale_stake = self.base_stake
-            log.info(f"[STAKING] Martingale WIN → reset to ${self.base_stake:.2f}")
-
-        elif self.strategy == "flat":
-            # Recalculate base stake from updated balance if compounding
-            import config
-            if config.COMPOUND:
-                self.base_stake  = self.balance * (config.STAKE_PERCENT / 100)
-                self.current_stake = self.base_stake
+        log.info(f"[RISK] ✅ WIN  +${profit:.2f} | "
+                 f"Balance: ${self.current_balance:.2f} | "
+                 f"Daily P&L: +${self.daily_profit:.2f}")
+        self._log_stats()
 
     def record_loss(self, stake: float):
-        """Update staking state after a loss."""
-        self.balance -= stake
-        self._update_balance(-stake)
+        """Call this after a losing trade."""
+        self.total_trades       += 1
+        self.total_losses       += 1
+        self.total_loss_amount  += stake
+        self.daily_loss         += stake
+        self.current_balance    -= stake
+        self.consecutive_losses += 1
 
-        if self.strategy == "dalembert":
-            # Increase by 1 unit after loss
-            self.dalembert_level += 1
-            self.current_stake = self.dalembert_unit * self.dalembert_level
-            log.info(f"[STAKING] D'Alembert LOSS → level {self.dalembert_level} "
-                     f"→ stake ${self.current_stake:.2f}")
+        log.warning(f"[RISK] ❌ LOSS -${stake:.2f} | "
+                    f"Balance: ${self.current_balance:.2f} | "
+                    f"Consecutive: {self.consecutive_losses} | "
+                    f"Daily loss: -${self.daily_loss:.2f}")
+        self._log_stats()
 
-        elif self.strategy == "oscar":
-            # Keep same level on loss — never increase on loss
-            self.oscar_session_profit -= stake
-            log.info(f"[STAKING] Oscar's Grind LOSS → keep level {self.oscar_level} "
-                     f"→ session P&L ${self.oscar_session_profit:.2f}")
+    # ─────────────────────────────────────────
+    # Pause logic
+    # ─────────────────────────────────────────
+    def trigger_pause(self):
+        """Pause trading for PAUSE_DURATION seconds."""
+        self._paused_until = time.time() + config.PAUSE_DURATION
+        resume_at = datetime.utcfromtimestamp(self._paused_until).strftime("%H:%M:%S UTC")
+        log.warning(f"[RISK] ⏸  Bot paused for "
+                    f"{config.PAUSE_DURATION // 60} minutes. "
+                    f"Resuming at {resume_at}")
+        self.consecutive_losses = 0   # reset counter after pause
 
-        elif self.strategy == "strategy1326":
-            # Reset to start on any loss
-            self.seq_position = 0
-            log.info(f"[STAKING] 1-3-2-6 LOSS → reset to position 0 (×1)")
+    def is_paused(self) -> bool:
+        """Return True if the bot is currently in a pause window."""
+        if self._paused_until is None:
+            return False
+        if time.time() < self._paused_until:
+            return True
+        # Pause expired — clear it
+        self._paused_until = None
+        log.info("[RISK] ▶️  Pause expired. Resuming trading.")
+        return False
 
-        elif self.strategy == "martingale":
-            # Double stake after loss
-            self.martingale_stake = min(
-                self.martingale_stake * 2,
-                self.balance * 0.03   # hard cap
-            )
-            log.info(f"[STAKING] Martingale LOSS → double to ${self.martingale_stake:.2f}")
+    def pause_remaining(self) -> float:
+        """Return seconds remaining in current pause. 0 if not paused."""
+        if self._paused_until is None:
+            return 0.0
+        remaining = self._paused_until - time.time()
+        return max(remaining, 0.0)
 
-        elif self.strategy == "flat":
-            import config
-            if config.COMPOUND:
-                self.base_stake   = self.balance * (config.STAKE_PERCENT / 100)
-                self.current_stake = self.base_stake
+    # ─────────────────────────────────────────
+    # Daily limit checks
+    # ─────────────────────────────────────────
+    def daily_loss_limit_hit(self) -> bool:
+        """Return True if daily loss has exceeded MAX_DAILY_LOSS_PCT."""
+        if self.daily_start_bal <= 0:
+            return False
+        if self.daily_loss <= 0:
+            return False
+        loss_pct = (self.daily_loss / self.daily_start_bal) * 100
+        return loss_pct >= config.MAX_DAILY_LOSS_PCT
 
-    def update_balance(self, new_balance: float):
-        """Sync balance from live account."""
-        self.balance = new_balance
-        if self.strategy == "flat":
-            import config
-            self.base_stake    = new_balance * (config.STAKE_PERCENT / 100)
-            self.current_stake = self.base_stake
+    def daily_profit_target_hit(self) -> bool:
+        """Return True if daily profit has reached DAILY_PROFIT_TARGET."""
+        if self.daily_start_bal <= 0:
+            return False
+        profit_pct = (self.daily_profit / self.daily_start_bal) * 100
+        return profit_pct >= config.DAILY_PROFIT_TARGET
 
-    def _raw_stake(self) -> float:
-        if self.strategy == "dalembert":
-            return self.dalembert_unit * self.dalembert_level
-        elif self.strategy == "oscar":
-            return self.base_stake * self.oscar_level
-        elif self.strategy == "strategy1326":
-            mult = self.sequence_1326[self.seq_position]
-            return self.base_stake * mult
-        elif self.strategy == "martingale":
-            return self.martingale_stake
-        else:
-            return self.current_stake
+    # ─────────────────────────────────────────
+    # Status check (replaces old check_risk())
+    # ─────────────────────────────────────────
+    def status(self) -> str:
+        """
+        Returns one of: "TRADE", "PAUSE", "STOP"
 
-    def _update_balance(self, delta: float):
-        """Keep base stake in sync with balance for flat/compound."""
-        pass
+        TRADE — safe to place next trade
+        PAUSE — temporarily halted (consecutive losses)
+        STOP  — halted for the day (daily limits)
+        """
+        if self.daily_loss_limit_hit() or self.daily_profit_target_hit():
+            return "STOP"
+        if self.is_paused():
+            return "PAUSE"
+        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSS:
+            self.trigger_pause()
+            return "PAUSE"
+        return "TRADE"
 
-    def get_info(self) -> dict:
-        """Return current staking state for dashboard."""
+    # ─────────────────────────────────────────
+    # Daily reset (called at midnight)
+    # ─────────────────────────────────────────
+    def reset_daily(self, new_balance: float = None):
+        """Reset daily counters. Called at midnight or start of new session."""
+        self.daily_profit    = 0.0
+        self.daily_loss      = 0.0
+        self.daily_start_bal = new_balance or self.current_balance
+        self.current_balance = self.daily_start_bal
+        self._paused_until   = None
+        self.consecutive_losses = 0
+        log.info(f"[RISK] 🔄 Daily reset | New balance: ${self.daily_start_bal:.2f}")
+
+    # ─────────────────────────────────────────
+    # Session summary
+    # ─────────────────────────────────────────
+    def get_summary(self) -> dict:
+        """Return a full session summary dict for dashboard/Telegram reporting."""
+        win_rate = (
+            round((self.total_wins / self.total_trades) * 100, 1)
+            if self.total_trades > 0 else 0.0
+        )
+        net_pnl = self.total_profit - self.total_loss_amount
         return {
-            "strategy":      self.strategy,
-            "base_stake":    round(self.base_stake, 2),
-            "current_stake": round(self.get_stake(), 2),
-            "balance":       round(self.balance, 2),
+            "balance":        round(self.current_balance, 2),
+            "starting_bal":   round(self.starting_balance, 2),
+            "total_trades":   self.total_trades,
+            "wins":           self.total_wins,
+            "losses":         self.total_losses,
+            "win_rate":       win_rate,
+            "net_pnl":        round(net_pnl, 2),
+            "daily_profit":   round(self.daily_profit, 2),
+            "daily_loss":     round(self.daily_loss, 2),
+            "consec_losses":  self.consecutive_losses,
+            "status":         "TRADE" if not self.is_paused() else "PAUSE",
+            "session_start":  self.session_start.strftime("%Y-%m-%d %H:%M UTC")
         }
+
+    # ─────────────────────────────────────────
+    # Internal helpers
+    # ─────────────────────────────────────────
+    def _log_stats(self):
+        win_rate = (
+            round((self.total_wins / self.total_trades) * 100, 1)
+            if self.total_trades > 0 else 0.0
+        )
+        log.info(f"[RISK] Stats — Trades: {self.total_trades} | "
+                 f"W: {self.total_wins} L: {self.total_losses} | "
+                 f"Win rate: {win_rate}% | "
+                 f"Net P&L: ${self.total_profit - self.total_loss_amount:.2f}")
