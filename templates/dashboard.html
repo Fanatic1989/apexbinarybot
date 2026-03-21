@@ -180,7 +180,7 @@
       <div class="log-box" id="log-box">Waiting...</div>
     </div>
     <div class="card">
-      <div class="ctitle">Market Scan — Last Signals</div>
+      <div class="ctitle">Market Scan — Last Signals <span style="font-size:10px;color:var(--muted);font-weight:400">— signals found across all markets. Only the best in the dominant direction is traded.</span></div>
       <div id="mkt-grid" class="mkt-grid"><div style="color:var(--muted);font-size:12px;padding:12px">No scan data yet</div></div>
     </div>
   </div>
@@ -318,7 +318,11 @@ function loadStatus(){
 function loadTrades(){
   api('/trades', d=>{
     const trades = (d.trades||[]).slice().reverse().slice(0,100);
-    if(!trades.length) return;
+    if(!trades.length){
+      document.getElementById('trade-tbody').innerHTML =
+        '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr>';
+      return;
+    }
 
     const tbody = document.getElementById('trade-tbody');
     // Map existing rows
