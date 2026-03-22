@@ -70,6 +70,9 @@
     #toast{position:fixed;bottom:24px;right:24px;z-index:9999;background:var(--green);color:#000;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:700;font-family:var(--mono);display:none}
     .tpbar{width:50px;height:3px;background:rgba(255,255,255,0.1);border-radius:2px;margin:3px auto 0}
     .tpfill{height:3px;border-radius:2px;transition:width .1s}
+    /* Recovery tracker */
+    .recovery-box{background:rgba(255,77,109,0.06);border:1px solid rgba(255,77,109,0.2);border-radius:10px;padding:12px 16px;margin-bottom:14px;display:none}
+    .recovery-box.show{display:block}
   </style>
 </head>
 <body>
@@ -108,6 +111,24 @@
     <div class="metric"><div class="mv" id="m-pnl">—</div><div class="ml">Net P&amp;L</div></div>
     <div class="metric mb"><div class="mv blu" id="m-dpnl">—</div><div class="ml">Daily P&amp;L</div></div>
     <div class="metric ma"><div class="mv amb" id="m-con">—</div><div class="ml">Consec. Losses</div></div>
+  </div>
+
+  <!-- Recovery tracker — shows when there's a net loss -->
+  <div class="recovery-box" id="recovery-box">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:10px;font-family:var(--mono);font-weight:700;color:var(--red);letter-spacing:.1em;margin-bottom:4px">&#128200; RECOVERY TRACKER</div>
+        <div id="recovery-msg" style="font-size:12px;color:var(--text);line-height:1.6"></div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">WINS TO BREAKEVEN</div>
+        <div id="recovery-wins" style="font-family:var(--mono);font-size:28px;font-weight:700;color:var(--amber)">—</div>
+      </div>
+    </div>
+    <div style="margin-top:10px;background:rgba(255,255,255,0.04);border-radius:6px;height:6px;overflow:hidden">
+      <div id="recovery-bar" style="height:6px;border-radius:6px;background:linear-gradient(90deg,var(--red),var(--amber));width:0%;transition:width .5s"></div>
+    </div>
+    <div id="recovery-sub" style="font-size:10px;color:var(--muted);margin-top:6px;font-family:var(--mono)"></div>
   </div>
 
   <div class="card">
@@ -177,13 +198,14 @@
     </div>
   </div>
 
+  <!-- AI Strategy Panel -->
   <div class="card" id="ai-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
       <span class="ctitle" style="margin-bottom:0">&#129302; AI Strategy Performance</span>
       <span id="ai-active-pill" class="pill pg">&#9679; Self-Learning</span>
     </div>
     <div id="ai-strategy-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
-      <div style="color:var(--muted);font-size:12px;padding:8px">Waiting for trade data...</div>
+      <div style="color:var(--muted);font-size:12px;padding:8px">Loading...</div>
     </div>
   </div>
 
@@ -237,7 +259,64 @@ function setMode(m){
   api('/mode/'+m, d=>{ toast('Mode: '+d.mode); loadStatus(); });
 }
 
-// ── Status ──────────────────────────────────────────────────
+// ── Recovery tracker ─────────────────────────────────────────
+function updateRecovery(risk, trades){
+  const box = document.getElementById('recovery-box');
+  if(!trades||!trades.length){ box.classList.remove('show'); return; }
+
+  // Calculate net P&L from completed trades
+  let netPnl = 0;
+  let lastStake = 0;
+  let totalWins = 0, totalLosses = 0;
+
+  trades.forEach(t=>{
+    if(t.result==='won'){ netPnl += parseFloat(t.profit||0); totalWins++; }
+    else if(t.result==='lost'){ netPnl -= parseFloat(t.stake||0); totalLosses++; lastStake = parseFloat(t.stake||0); }
+  });
+
+  if(netPnl >= 0){ box.classList.remove('show'); return; }
+
+  // How much in the hole?
+  const deficit = Math.abs(netPnl);
+
+  // Estimate payout ratio from recent wins
+  const recentWins = trades.filter(t=>t.result==='won').slice(-5);
+  let avgPayoutRatio = 0.85; // default
+  if(recentWins.length > 0){
+    const ratios = recentWins.map(t=>{
+      const p = parseFloat(t.profit||0);
+      const s = parseFloat(t.stake||0);
+      return s > 0 ? p/s : 0.85;
+    }).filter(r=>r>0);
+    if(ratios.length) avgPayoutRatio = ratios.reduce((a,b)=>a+b,0)/ratios.length;
+  }
+
+  // Current stake
+  const stakeEl = document.getElementById('stake-display');
+  const stakeStr = stakeEl ? stakeEl.textContent.replace('$','') : '0';
+  const currentStake = parseFloat(stakeStr)||lastStake||10;
+  const profitPerWin = currentStake * avgPayoutRatio;
+
+  // Wins needed to break even
+  const winsNeeded = profitPerWin > 0 ? Math.ceil(deficit / profitPerWin) : '?';
+
+  // Progress: how many wins have we recovered so far this session?
+  const winsThisSession = totalWins;
+  const progressPct = winsNeeded > 0 ? Math.min(100, (winsThisSession / (winsThisSession + winsNeeded)) * 100) : 0;
+
+  box.classList.add('show');
+  document.getElementById('recovery-wins').textContent = winsNeeded;
+  document.getElementById('recovery-msg').innerHTML =
+    `Down <strong style="color:var(--red)">$${deficit.toFixed(2)}</strong> — ` +
+    `each win returns ~<strong style="color:var(--amber)">$${profitPerWin.toFixed(2)}</strong> ` +
+    `(${(avgPayoutRatio*100).toFixed(0)}% payout at $${currentStake.toFixed(2)} stake)`;
+  document.getElementById('recovery-bar').style.width = progressPct+'%';
+  document.getElementById('recovery-sub').textContent =
+    `${totalWins} win${totalWins!==1?'s':''} so far this session · ` +
+    `${winsNeeded} more to break even`;
+}
+
+// ── Status ───────────────────────────────────────────────────
 function loadStatus(){
   api('/status', d=>{
     const run = d.bot_running;
@@ -269,18 +348,18 @@ function loadStatus(){
     if(d.risk_pct && d.risk_pct !== currentRisk) currentRisk = d.risk_pct;
     if(r && r.balance) updateRiskDisplay(currentRisk, r.balance);
     if(d.ai_strategy) buildAIPanel(d.ai_strategy);
-    // ── News panel — THIS was the missing call ──
     buildNewsPanel(d.news_events || []);
   });
 }
 
-// ── Trades ──────────────────────────────────────────────────
+// ── Trades ───────────────────────────────────────────────────
 function loadTrades(){
   api('/trades', d=>{
     const trades = (d.trades||[]).slice().reverse().slice(0,100);
     if(!trades.length){
       document.getElementById('trade-tbody').innerHTML =
         '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr>';
+      updateRecovery(currentRisk, []);
       return;
     }
     const tbody = document.getElementById('trade-tbody');
@@ -385,6 +464,8 @@ function loadTrades(){
       });
       document.getElementById('sess-tbody').innerHTML=sh;
     }
+    // Update recovery tracker
+    updateRecovery(currentRisk, trades);
   });
 }
 
@@ -454,30 +535,55 @@ function buildNewsPanel(events){
   box.innerHTML=h;
 }
 
-// ── AI panel ─────────────────────────────────────────────────
+// ── AI panel — shows backtest priors until live data exists ──
 function buildAIPanel(ai){
   if(!ai||!ai.win_rates) return;
-  const NAMES={rsi_reversal:'RSI Reversal',bb_bounce:'BB Bounce',ema_triple:'EMA Triple',false_breakout:'False Breakout',momentum_streak:'Momentum'};
+  const NAMES={
+    rsi_reversal:'RSI Reversal', bb_bounce:'BB Bounce',
+    ema_triple:'EMA Triple', false_breakout:'False Breakout',
+    momentum_streak:'Momentum', fvg_retest:'FVG Retest',
+    pivot_stochrsi:'Pivot/StochRSI'
+  };
   const rates=ai.win_rates;
-  let best=null,bestWR=-1,html='';
+  let best=null, bestWR=-1, html='';
+
   Object.entries(rates).forEach(([s,v])=>{
-    if(!v.total){ html+=`<div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;opacity:.5"><div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${NAMES[s]||s}</div><div style="font-size:11px;color:var(--muted);margin-top:4px">No data yet</div></div>`; return; }
-    const wr=parseFloat(v.win_rate||0);
-    const col=wr>=65?'var(--green)':wr>=55?'var(--amber)':'var(--red)';
-    const bar=Math.min(100,wr);
-    if(wr>bestWR&&wr>=55&&v.total>=3){bestWR=wr;best=s;}
-    html+=`<div style="background:var(--bg3);border:1px solid ${wr>=60?col:'var(--bdr)'};border-radius:8px;padding:10px 12px;position:relative;overflow:hidden">
+    const wr   = parseFloat(v.win_rate||0);
+    const total= v.total||0;
+    const isLive = v.source === 'live';
+
+    if(total === 0){
+      html+=`<div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;opacity:.5">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${NAMES[s]||s}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">No data yet</div>
+      </div>`;
+      return;
+    }
+
+    const col = wr>=65?'var(--green)':wr>=55?'var(--amber)':'var(--red)';
+    const bar = Math.min(100,wr);
+    const bdr = (wr>=60 && isLive) ? col : 'var(--bdr)';
+
+    if(wr>bestWR && wr>=55 && total>=(isLive?3:15)){bestWR=wr;best=s;}
+
+    html+=`<div style="background:var(--bg3);border:1px solid ${bdr};border-radius:8px;padding:10px 12px;position:relative;overflow:hidden">
       <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">${NAMES[s]||s}</div>
-      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${col};margin:4px 0">${v.win_rate||'—'}%</div>
-      <div style="font-size:10px;color:var(--muted)">${v.wins}W ${v.losses}L · ${v.total} trades</div>
+      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${col};margin:4px 0">${wr.toFixed(1)}%</div>
+      <div style="font-size:10px;color:var(--muted)">${v.wins}W ${v.losses}L · ${total} trades
+        ${!isLive?'<span style="color:#4d9fff;font-family:var(--mono);margin-left:4px;font-size:9px">PRIOR</span>':''}
+      </div>
       <div style="background:rgba(255,255,255,0.05);border-radius:2px;height:3px;margin-top:8px">
         <div style="width:${bar}%;height:3px;border-radius:2px;background:${col};transition:width .5s"></div>
       </div>
       ${best===s?'<div style="position:absolute;top:6px;right:8px;font-size:9px;font-family:var(--mono);color:var(--green);font-weight:700">★ BEST</div>':''}
     </div>`;
   });
+
   document.getElementById('ai-strategy-grid').innerHTML=html;
-  if(best){ document.getElementById('ai-active-pill').textContent='★ '+(NAMES[best]||best); document.getElementById('ai-active-pill').className='pill pg'; }
+  if(best){
+    document.getElementById('ai-active-pill').textContent='★ '+(NAMES[best]||best);
+    document.getElementById('ai-active-pill').className='pill pg';
+  }
 }
 
 // ── Timers ───────────────────────────────────────────────────
