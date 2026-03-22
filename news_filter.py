@@ -17,15 +17,14 @@ from bs4 import BeautifulSoup
 log = logging.getLogger(__name__)
 
 # ------------------------------------------------------------
-# ForexFactory scraper (embedded, improved)
+# ForexFactory scraper (robust JSON with cookie handling)
 # ------------------------------------------------------------
 class ForexFactoryScraper:
-    """Fetches economic calendar events from ForexFactory using HTML or JSON."""
+    """Fetches economic calendar events from ForexFactory using the JSON export."""
 
     BASE_URL = "https://www.forexfactory.com"
     CALENDAR_URL = f"{BASE_URL}/calendar"
-    POST_URL = f"{BASE_URL}/calendar.php"
-    JSON_URL = f"{BASE_URL}/calendar/weekly-export.json"   # alternative JSON endpoint
+    JSON_URL = f"{BASE_URL}/calendar/weekly-export.json"
 
     # Realistic Chrome 120 headers
     HEADERS = {
@@ -42,154 +41,86 @@ class ForexFactoryScraper:
         "Cache-Control": "max-age=0",
     }
 
-    # Headers for AJAX POST (after initial GET)
-    AJAX_HEADERS = {
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": BASE_URL,
+    # Headers for JSON request (after we have cookies)
+    JSON_HEADERS = {
+        "Accept": "application/json, text/plain, */*",
         "Referer": CALENDAR_URL,
-    }
-
-    IMPACT_MAP = {
-        "High Impact Expected": "High",
-        "Medium Impact Expected": "Medium",
-        "Low Impact Expected": "Low",
-        "Holiday": "Non-Economic",
-        "Non-Economic": "Non-Economic",
+        "Origin": BASE_URL,
     }
 
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
-        self.token = None
 
-    def _get_token(self) -> str:
-        """Fetch the CSRF token from the main calendar page."""
+    def _get_cookies(self) -> bool:
+        """Visit the calendar page to get cookies and CSRF token if needed."""
         try:
             resp = self.session.get(self.CALENDAR_URL, timeout=15)
             resp.raise_for_status()
+            # Small delay to mimic human
+            time.sleep(1)
+            return True
         except Exception as e:
-            log.error(f"Failed to fetch calendar page: {e}")
-            raise
+            log.warning(f"Could not fetch calendar page for cookies: {e}")
+            return False
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Try input field first
-        token_input = soup.find("input", {"name": "_token"})
-        if token_input:
-            return token_input["value"]
+    def get_week(self, week: str = "thisweek") -> List[Dict]:
+        """
+        Fetch JSON export for a given week.
+        Uses cookie/session from main page, retries with backoff.
+        """
+        # First, get cookies from main page
+        self._get_cookies()
 
-        # Try meta tag (common in many apps)
-        meta_token = soup.find("meta", {"name": "csrf-token"})
-        if meta_token and meta_token.get("content"):
-            return meta_token["content"]
+        # Prepare JSON request headers (add Referer etc.)
+        json_headers = self.JSON_HEADERS.copy()
+        json_headers.update(self.session.headers)
 
-        raise ValueError("CSRF token not found in page")
-
-    def _fetch_via_json(self, week: str) -> List[Dict]:
-        """Fallback: fetch JSON export directly (no token needed)."""
-        params = {"week": week}
-        try:
-            resp = self.session.get(self.JSON_URL, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            # The JSON structure is an array of events
-            # Each event has fields: date, time, currency, impact, title, etc.
-            events = []
-            for item in data:
-                impact = item.get("impact", "")
-                # Convert impact from numeric to text (e.g., "High", "Medium")
-                impact_map = {3: "High", 2: "Medium", 1: "Low", 0: "Non-Economic"}
-                impact_text = impact_map.get(impact, "Unknown")
-                events.append({
-                    "time": item.get("time", ""),
-                    "currency": item.get("currency", ""),
-                    "impact": impact_text,
-                    "event": item.get("title", ""),
-                })
-            return events
-        except Exception as e:
-            log.error(f"JSON fallback failed: {e}")
-            raise
-
-    def _post_week(self, week: str) -> str:
-        """Attempt to get calendar via POST with token."""
-        if self.token is None:
-            self.token = self._get_token()
-
-        # Simulate a human delay
-        time.sleep(1.5)
-
-        # Add AJAX headers for this POST
-        self.session.headers.update(self.AJAX_HEADERS)
-
-        data = {
-            "_token": self.token,
+        params = {
             "week": week,
-            "currencies[]": "all",
             "timezone": "GMT",
         }
 
-        try:
-            resp = self.session.post(self.POST_URL, data=data, timeout=15)
-            resp.raise_for_status()
-        except Exception as e:
-            log.warning(f"POST request failed, trying JSON fallback: {e}")
-            # Reset headers before JSON fallback
-            self.session.headers.update(self.HEADERS)
-            raise  # will be caught in get_week
-        finally:
-            # Restore default headers for future GET requests
-            self.session.headers.update(self.HEADERS)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = self.session.get(
+                    self.JSON_URL,
+                    params=params,
+                    headers=json_headers,
+                    timeout=15
+                )
 
-        return resp.text
+                # Check if we got actual JSON
+                content_type = resp.headers.get("Content-Type", "")
+                if resp.status_code == 200 and "application/json" in content_type:
+                    data = resp.json()
+                    events = []
+                    for item in data:
+                        # Map impact numeric to text
+                        impact_map = {3: "High", 2: "Medium", 1: "Low", 0: "Non-Economic"}
+                        impact = impact_map.get(item.get("impact", 0), "Unknown")
+                        events.append({
+                            "time": item.get("time", ""),
+                            "currency": item.get("currency", ""),
+                            "impact": impact,
+                            "event": item.get("title", ""),
+                        })
+                    if events:
+                        return events
+                    else:
+                        log.warning("JSON response empty, retrying")
+                else:
+                    log.warning(f"Attempt {attempt+1}: got status {resp.status_code}, content type {content_type}")
 
-    def _parse_html(self, html: str) -> List[Dict]:
-        """Parse the HTML table from the POST response."""
-        soup = BeautifulSoup(html, "html.parser")
-        table = soup.find("table", {"id": "calendarTable"})
-        if not table:
-            return []
+            except Exception as e:
+                log.warning(f"Attempt {attempt+1} failed: {e}")
 
-        rows = table.find_all("tr", class_="calendar_row")
-        events = []
-        for row in rows:
-            time_td = row.find("td", class_="calendar__time")
-            currency_td = row.find("td", class_="calendar__currency")
-            impact_td = row.find("td", class_="calendar__impact")
-            event_td = row.find("td", class_="calendar__event")
+            # Exponential backoff before retry
+            time.sleep(2 ** attempt)
 
-            if not all([time_td, currency_td, impact_td, event_td]):
-                continue
-
-            time_str = time_td.get_text(strip=True)
-            currency = currency_td.get_text(strip=True)
-            impact_img = impact_td.find("img")
-            impact = "Unknown"
-            if impact_img and impact_img.get("alt"):
-                alt = impact_img["alt"].strip()
-                impact = self.IMPACT_MAP.get(alt, "Unknown")
-            event = event_td.get_text(strip=True)
-
-            events.append({
-                "time": time_str,
-                "currency": currency,
-                "impact": impact,
-                "event": event,
-            })
-        return events
-
-    def get_week(self, week: str = "thisweek") -> List[Dict]:
-        """Get events for a week. Uses POST first, falls back to JSON."""
-        try:
-            html = self._post_week(week)
-            events = self._parse_html(html)
-            if events:
-                return events
-            # If no events parsed, try JSON as fallback
-            log.info("No events from HTML, trying JSON fallback")
-            return self._fetch_via_json(week)
-        except Exception as e:
-            log.warning(f"HTML scraping failed, trying JSON fallback: {e}")
-            return self._fetch_via_json(week)
+        # If all retries fail, raise an exception (will be caught by caller)
+        raise RuntimeError("Failed to fetch JSON data after retries")
 
     def get_current_week(self) -> List[Dict]:
         return self.get_week("thisweek")
