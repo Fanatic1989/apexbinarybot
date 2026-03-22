@@ -10,6 +10,7 @@ import logging
 import time
 import threading
 import json
+import os  # <-- added for binary path detection
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 
@@ -75,11 +76,34 @@ class ForexFactoryScraper:
             log.warning(f"Could not fetch calendar page for cookies: {e}")
             return False
 
+    def _find_chrome_binary(self) -> str:
+        """Return the path to Chrome/Chromium binary."""
+        # First check environment variable (set in render.yaml)
+        env_bin = os.environ.get('CHROME_BIN')
+        if env_bin and os.path.exists(env_bin):
+            return env_bin
+
+        # Common locations on Linux
+        candidates = [
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        # If not found, fallback to default (will raise error later)
+        return "chromium-browser"
+
     def _fetch_via_selenium(self, week: str = "thisweek") -> List[Dict]:
         """Use Selenium to extract events when requests are blocked."""
         if not SELENIUM_AVAILABLE:
             log.error("Selenium not installed. Cannot fetch events.")
             raise RuntimeError("Selenium not available")
+
+        chrome_bin = self._find_chrome_binary()
+        log.info(f"Using Chrome binary: {chrome_bin}")
 
         options = uc.ChromeOptions()
         options.add_argument("--headless")
@@ -87,13 +111,15 @@ class ForexFactoryScraper:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
+        options.binary_location = chrome_bin
 
-        driver = uc.Chrome(options=options)
+        driver = None
         try:
+            driver = uc.Chrome(options=options)
             driver.get(self.CALENDAR_URL)
             wait = WebDriverWait(driver, 15)
 
-            # Click "Weekly Export" dropdown if needed (sometimes visible)
+            # Try to get JSON via export dropdown
             try:
                 export_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Weekly Export')]")))
                 export_btn.click()
@@ -104,8 +130,8 @@ class ForexFactoryScraper:
                 driver.switch_to.window(driver.window_handles[-1])
                 json_text = driver.find_element(By.TAG_NAME, "pre").text
                 data = json.loads(json_text)
-            except:
-                # Fallback: scrape table directly
+            except Exception as e:
+                log.warning(f"JSON export failed, falling back to table scrape: {e}")
                 data = self._scrape_table_with_selenium(driver)
 
             events = []
@@ -120,7 +146,8 @@ class ForexFactoryScraper:
                 })
             return events
         finally:
-            driver.quit()
+            if driver:
+                driver.quit()
 
     def _scrape_table_with_selenium(self, driver):
         """Fallback when JSON export fails: scrape table rows."""
