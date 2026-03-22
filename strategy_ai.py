@@ -467,16 +467,37 @@ class StrategyTracker:
         return out
 
     def get_win_rates(self) -> dict:
-        """Live win rates from actual trades (not priors) for dashboard."""
+        """
+        Returns live win rates if available, otherwise falls back to
+        backtested priors so the dashboard always shows data.
+        source='live'     = real trade results
+        source='backtest' = prior estimate (shown with PRIOR badge)
+        """
         rates = {}
         for name, stats in self.data["strategies"].items():
             total = stats["wins"] + stats["losses"]
-            rates[name] = {
-                "win_rate": round(stats["wins"]/total*100,1) if total>0 else None,
-                "total":    total,
-                "wins":     stats["wins"],
-                "losses":   stats["losses"],
-            }
+            if total > 0:
+                # Real live data — use it
+                rates[name] = {
+                    "win_rate": round(stats["wins"] / total * 100, 1),
+                    "total":    total,
+                    "wins":     stats["wins"],
+                    "losses":   stats["losses"],
+                    "source":   "live",
+                }
+            else:
+                # No live trades yet — show backtest prior
+                prior = BACKTESTED_PRIORS.get(name, {})
+                wr_pct, count = prior.get("any", (50, 10))
+                wins   = round(count * wr_pct / 100)
+                losses = count - wins
+                rates[name] = {
+                    "win_rate": float(wr_pct),
+                    "total":    count,
+                    "wins":     wins,
+                    "losses":   losses,
+                    "source":   "backtest",
+                }
         return rates
 
     def get_summary(self) -> dict:
