@@ -32,6 +32,7 @@ _market_locks   = {}
 _global_lock    = threading.Lock()
 _session_trades = 0
 _session_lock   = threading.Lock()
+_last_regime    = {}   # market -> last detected regime (for TS recording)
 
 SESSION_1_HOURS = 12
 REST_HOURS      = 1
@@ -42,50 +43,42 @@ MAX_TRADES_S2   = 45
 # ─────────────────────────────────────────
 # MINIMUM PAYOUT RATIO PER RISK LEVEL
 # ─────────────────────────────────────────
-# If you lose $10, the next win must return at least:
-#   1% risk → $15  (1.5x)
-#   2% risk → $17.50 (1.75x)
-#   3% risk → $20  (2.0x)
+# Deriv binary options typically pay 80-95% of stake as profit.
+# These minimums block genuinely bad-value trades (e.g. forex during
+# low liquidity paying only 60-70%) while allowing normal synthetics through.
 #
-# Deriv payout = stake + profit, so:
-#   min_payout_ratio = (stake + min_profit) / stake
-#   1% → profit >= 1.5x stake  → payout ratio >= 2.5
-#   2% → profit >= 1.75x stake → payout ratio >= 2.75
-#   3% → profit >= 2.0x stake  → payout ratio >= 3.0
+# Rule: if you lose $100, the next win must return at least X% of stake.
+#   1% risk → need >= 75% of stake as profit  (win $75 on $100 stake)
+#   2% risk → need >= 80% of stake as profit  (win $80 on $100 stake)
+#   3% risk → need >= 85% of stake as profit  (win $85 on $100 stake)
 #
-# In practice Deriv binary payouts are expressed as total payout / stake:
-#   e.g. stake=$10, payout=$18 → ratio=1.8 → profit=$8 (0.8x stake)
-# We use profit/stake (not payout/stake) for the ratio check.
+# This blocks trades paying < 75% (bad value) while passing
+# normal 80-95% payout synthetics and good forex setups.
 
 MIN_PROFIT_RATIO = {
-    1: 1.5,   # 1% risk: profit must be >= 1.5x stake
-    2: 1.75,  # 2% risk: profit must be >= 1.75x stake
-    3: 2.0,   # 3% risk: profit must be >= 2.0x stake
+    1: 0.75,   # 1% risk: profit must be >= 75% of stake
+    2: 0.80,   # 2% risk: profit must be >= 80% of stake
+    3: 0.85,   # 3% risk: profit must be >= 85% of stake
 }
 
 
 def _get_min_profit_ratio() -> float:
     """Return the minimum profit/stake ratio for the current risk setting."""
     risk_pct = int(getattr(config, "STAKE_PERCENT", 1))
-    return MIN_PROFIT_RATIO.get(risk_pct, 1.5)
+    return MIN_PROFIT_RATIO.get(risk_pct, 0.75)
 
 
 def _check_payout_ratio(market: str, direction: str,
-                        stake: float, expiry: int) -> tuple:
+                         stake: float, expiry: int) -> tuple:
     """
-    Fetch a Deriv proposal for this trade and check if the payout ratio
-    meets the minimum recovery threshold for the current risk level.
+    Fetch a Deriv proposal and check payout meets minimum recovery threshold.
 
     Returns:
         (passes: bool, profit: float, ratio: float, reason: str)
-
-    Uses get_proposal from deriv_api if available, otherwise falls back
-    to a direct websocket call.
     """
     min_ratio = _get_min_profit_ratio()
 
     try:
-        # Try to use get_proposal from deriv_api if it exists
         from deriv_api import get_proposal
         proposal = get_proposal(
             symbol=market,
@@ -94,11 +87,9 @@ def _check_payout_ratio(market: str, direction: str,
             duration_minutes=expiry
         )
     except (ImportError, AttributeError):
-        # get_proposal not in deriv_api yet — use direct websocket call
         proposal = _fetch_proposal_direct(market, direction, stake, expiry)
 
     if not proposal:
-        # Can't verify payout — allow trade but log warning
         log.warning(f"[{market}] Could not fetch proposal — skipping payout check")
         return True, 0.0, 0.0, "proposal_unavailable"
 
@@ -112,14 +103,15 @@ def _check_payout_ratio(market: str, direction: str,
     passes = ratio >= min_ratio
     reason = (
         f"profit=${profit:.2f} ratio={ratio:.2f}x "
-        f"(need {min_ratio:.2f}x for {int(getattr(config,'STAKE_PERCENT',1))}% risk)"
+        f"(need {min_ratio:.2f}x for "
+        f"{int(getattr(config, 'STAKE_PERCENT', 1))}% risk)"
     )
 
     return passes, profit, ratio, reason
 
 
 def _fetch_proposal_direct(market: str, direction: str,
-                           stake: float, expiry: int) -> dict:
+                            stake: float, expiry: int) -> dict:
     """
     Fallback: fetch a proposal directly via websocket if deriv_api
     doesn't expose get_proposal yet.
@@ -134,23 +126,21 @@ def _fetch_proposal_direct(market: str, direction: str,
                f"?app_id={config.DERIV_APP_ID}")
         ws = _ws.create_connection(url, timeout=10)
 
-        # Authorise
         ws.send(_json.dumps({"authorize": config.ACTIVE_TOKEN}))
         auth = _json.loads(ws.recv())
         if "error" in auth:
             log.warning(f"[PROPOSAL] Auth failed: {auth['error']['message']}")
             return {}
 
-        # Request proposal
         ws.send(_json.dumps({
-            "proposal":       1,
-            "amount":         stake,
-            "basis":          "stake",
-            "contract_type":  contract_type,
-            "currency":       "USD",
-            "duration":       expiry,
-            "duration_unit":  "m",
-            "symbol":         market,
+            "proposal":      1,
+            "amount":        stake,
+            "basis":         "stake",
+            "contract_type": contract_type,
+            "currency":      "USD",
+            "duration":      expiry,
+            "duration_unit": "m",
+            "symbol":        market,
         }))
         resp = _json.loads(ws.recv())
 
@@ -192,7 +182,7 @@ def run_bot():
         raise ConnectionError("Deriv connection failed")
 
     risk_manager   = RiskManager(starting_balance=balance)
-    base_stake     = max(balance * (config.STAKE_PERCENT/100), 0.35)
+    base_stake     = max(balance * (config.STAKE_PERCENT / 100), 0.35)
     staking_engine = StakingEngine(base_stake=base_stake, balance=balance)
 
     import bot as _s
@@ -277,7 +267,8 @@ def _run_session(name, max_trades, max_hours):
 def _parallel_scan(markets):
     """
     Scan all markets simultaneously for signals.
-    Collect ALL signals then trade only the SINGLE best one.
+    Collect ALL signals then trade only the SINGLE best one
+    in the dominant direction.
     """
     signals_found = []
     signals_lock  = threading.Lock()
@@ -295,8 +286,10 @@ def _parallel_scan(markets):
             if not candles or len(candles) < 40:
                 return
             signal = analyze_market(candles, market)
+
             import bot as _b
-            _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
+            _b.last_signals = [s for s in _b.last_signals
+                               if s.get("market") != market]
             if signal and signal.get("direction") != "NONE":
                 _b.last_signals.append({
                     "market":     market,
@@ -307,13 +300,16 @@ def _parallel_scan(markets):
                 })
                 if len(_b.last_signals) > 40:
                     _b.last_signals = _b.last_signals[-40:]
+
             if not signal or not signal.get("confirmed", False):
                 return
             if signal.get("direction") == "NONE":
                 return
+
             score = 2 if signal.get("confidence") == "high" else 1
             with signals_lock:
                 signals_found.append((score, market, signal, candles))
+
         except Exception as e:
             log.error(f"[{market}] Scan error: {e}")
 
@@ -333,6 +329,7 @@ def _parallel_scan(markets):
         log.debug("[BOT] No confirmed signals this scan")
         return
 
+    # ── Dominant direction filter ─────────────────────────────
     put_signals  = [s for s in signals_found if s[2].get("direction") == "PUT"]
     call_signals = [s for s in signals_found if s[2].get("direction") == "CALL"]
     total        = len(signals_found)
@@ -395,20 +392,23 @@ def _scan_market(market, signal=None):
             return
         if not signal.get("confirmed", False):
             log.info(f"[{market}] {signal.get('direction')} score "
-                     f"{signal.get('score',0)}/5 — not confirmed")
+                     f"{signal.get('score', 0)}/5 — not confirmed")
             return
 
         direction  = signal["direction"]
         confidence = signal.get("confidence", "normal")
         strategy   = signal.get("strategy", "unknown")
         expiry     = config.get_expiry(market)
+        regime     = signal.get("regime", "any")
+
+        # Store regime for outcome recording
+        import bot as _b
+        _b._last_regime[market] = regime
 
         with _global_lock:
             stake = staking_engine.get_stake() if staking_engine else 0.35
 
         # ── PAYOUT RATIO CHECK ────────────────────────────────
-        # Before placing any trade, verify the payout meets the
-        # minimum recovery ratio for the current risk level.
         passes, exp_profit, ratio, reason = _check_payout_ratio(
             market, direction, stake, expiry
         )
@@ -502,7 +502,6 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
     strategy    = signal.get("strategy", "unknown")
     confidence  = signal.get("confidence", "normal")
     expiry      = signal.get("expiry", config.get_expiry(market))
-    payout      = trade.get("payout", 0)
 
     _update_trade(contract_id, {
         "result": status,
@@ -510,6 +509,7 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
     })
 
     import bot as _b
+    regime = _b._last_regime.get(market, "any")
 
     if status == "won":
         log.info(f"[{market}] ✅ WON +${profit:.2f}")
@@ -520,7 +520,7 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
         send_alert(f"✅ {market} {direction} WON +${profit:.2f}\n"
                    f"Strategy: {strategy}\n"
                    f"Balance: ${risk_manager.current_balance:.2f}")
-        try: record_trade_outcome(market, strategy, "won")
+        try: record_trade_outcome(market, strategy, "won", regime=regime)
         except: pass
 
     elif status == "lost":
@@ -531,7 +531,7 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
         send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
                    f"Strategy: {strategy}\n"
                    f"Balance: ${risk_manager.current_balance:.2f}")
-        try: record_trade_outcome(market, strategy, "lost")
+        try: record_trade_outcome(market, strategy, "lost", regime=regime)
         except: pass
 
         _b._market_losses[market] = _b._market_losses.get(market, 0) + 1
@@ -551,7 +551,10 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
 
 def _save_trade(trade):
     history_file = "trade_history.json"
-    empty = {"trades":[],"total_trades":0,"total_wins":0,"total_losses":0,"net_pnl":0.0}
+    empty = {
+        "trades": [], "total_trades": 0,
+        "total_wins": 0, "total_losses": 0, "net_pnl": 0.0
+    }
     trade.setdefault("time", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
     trade.setdefault("contract_id", "—")
     trade["stake"]  = round(float(trade.get("stake",  0)), 2)
@@ -586,7 +589,7 @@ def _save_trade(trade):
             data["trades"] = data["trades"][-500:]
         with open(history_file, "w") as f: json.dump(data, f, indent=2)
         log.info(f"[HISTORY] Saved {trade['symbol']} {trade['direction']} "
-                 f"{trade.get('result','open').upper()}")
+                 f"{trade.get('result', 'open').upper()}")
     except Exception as e:
         log.error(f"[HISTORY] Save failed: {e}")
         try:
@@ -616,7 +619,7 @@ def _update_trade(contract_id, updates):
                 data["net_pnl"]      = round(data.get("net_pnl", 0) + profit, 2)
             with open(history_file, "w") as f: json.dump(data, f, indent=2)
             log.info(f"[HISTORY] Updated #{contract_id} → "
-                     f"{updates.get('result','?').upper()}")
+                     f"{updates.get('result', '?').upper()}")
         else:
             log.warning(f"[HISTORY] #{contract_id} not found for update")
     except Exception as e:
