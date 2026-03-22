@@ -100,7 +100,6 @@ def status():
     if hasattr(bot, "staking_engine") and bot.staking_engine:
         staking_info = bot.staking_engine.get_info()
 
-    # AI strategy performance
     ai_info = None
     try:
         from strategy_ai import tracker
@@ -125,29 +124,86 @@ def status():
 
 def _get_upcoming_news():
     """
-    Fetch upcoming news events and normalise keys to match
-    what the dashboard JS buildNewsPanel() expects:
-      title, currency, impact (lowercase), time_utc, mins_away, source
+    Normalise news events for the dashboard buildNewsPanel() function.
+    Looks ahead 72h on weekends so Monday events always show.
     """
     try:
         from news_filter import news_filter
-        raw = news_filter.get_upcoming_events(hours=4)
+
+        now     = datetime.now(timezone.utc)
+        weekday = now.weekday()  # 5=Sat, 6=Sun
+        hours   = 72 if weekday >= 5 else 8
+
+        raw = news_filter.get_upcoming_events(hours=hours)
         out = []
         for e in raw:
             mins = e.get("mins_away", 0)
-            eta  = datetime.now(timezone.utc) + timedelta(minutes=mins)
+            eta  = now + timedelta(minutes=mins)
             out.append({
                 "title":     e.get("title") or e.get("event") or "—",
                 "currency":  e.get("currency", ""),
                 "impact":    (e.get("impact") or "").lower(),
                 "time_utc":  eta.strftime("%H:%M UTC"),
+                "date_utc":  eta.strftime("%a %d %b"),
                 "mins_away": mins,
                 "source":    e.get("source", ""),
             })
-        return out
+
+        out.sort(key=lambda x: x["mins_away"])
+        return out[:10]
+
     except Exception as ex:
         log.debug(f"[SERVER] _get_upcoming_news error: {ex}")
         return []
+
+
+# ─────────────────────────────────────────
+# Route: Debug news
+# ─────────────────────────────────────────
+@app.route("/debug-news")
+@login_required
+def debug_news():
+    import requests as _req
+    results = {}
+
+    FF_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept":     "application/json",
+        "Referer":    "https://www.forexfactory.com/",
+    }
+
+    for key, url in [
+        ("ff_thisweek", "https://nfs.faireconomy.media/ff_calendar_thisweek.json"),
+        ("ff_nextweek", "https://nfs.faireconomy.media/ff_calendar_nextweek.json"),
+    ]:
+        try:
+            r = _req.get(url, headers=FF_HEADERS, timeout=10)
+            data = r.json() if r.status_code == 200 else []
+            results[key] = {
+                "status":  r.status_code,
+                "count":   len(data) if isinstance(data, list) else "not a list",
+                "sample":  data[0] if isinstance(data, list) and data else None,
+            }
+        except Exception as e:
+            results[key] = {"error": str(e)}
+
+    try:
+        from news_filter import news_filter
+        results["filter_dynamic_count"] = len(news_filter._dynamic_events)
+        results["filter_last_update"]   = str(news_filter._last_update)
+        results["source_summary"]       = news_filter.get_source_summary()
+        results["upcoming_4h"]          = news_filter.get_upcoming_events(hours=4)
+        results["upcoming_72h"]         = news_filter.get_upcoming_events(hours=72)
+        results["raw_sample"]           = [
+            {k: str(v) for k, v in e.items()}
+            for e in news_filter._dynamic_events[:3]
+        ]
+    except Exception as e:
+        results["filter_error"] = str(e)
+
+    results["server_utc"] = datetime.now(timezone.utc).isoformat()
+    results["weekday"]    = datetime.now(timezone.utc).weekday()
+    return jsonify(results)
 
 
 # ─────────────────────────────────────────
@@ -218,12 +274,10 @@ def set_risk(pct):
 
     config.STAKE_PERCENT = float(pct)
 
-    # Get live balance from Deriv if bot running, else use last known
     balance = 0.0
     if hasattr(bot, "risk_manager") and bot.risk_manager:
         balance = float(bot.risk_manager.current_balance or 0)
 
-    # If balance still 0, try fetching from Deriv directly
     if balance <= 0:
         try:
             from deriv_api import get_balance
@@ -392,7 +446,6 @@ def test_durations():
 
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
-# Render pings this to keep container alive
 # ─────────────────────────────────────────
 @app.route("/health")
 def health():
@@ -405,7 +458,6 @@ def health():
 @app.route("/test-connection")
 @login_required
 def test_connection():
-    """Test Deriv API connection and show exactly what is failing."""
     import websocket, json
     results = {
         "app_id":        config.DERIV_APP_ID,
@@ -438,12 +490,8 @@ def test_connection():
 # Watchdog — auto restart bot if it crashes
 # ─────────────────────────────────────────
 def _watchdog():
-    """
-    Runs in background. If bot_running=True but
-    thread is dead, restarts the bot automatically.
-    """
     import time as _time
-    _time.sleep(60)  # initial delay
+    _time.sleep(60)
     while True:
         global bot_thread, bot_running
         if bot_running and (bot_thread is None or not bot_thread.is_alive()):
@@ -455,9 +503,9 @@ def _watchdog():
             log.info("[WATCHDOG] Bot restarted.")
         _time.sleep(30)
 
-# Start watchdog on import
 _watchdog_thread = threading.Thread(target=_watchdog, daemon=True, name="Watchdog")
 _watchdog_thread.start()
+
 
 # ─────────────────────────────────────────
 # Bot runner wrapper
