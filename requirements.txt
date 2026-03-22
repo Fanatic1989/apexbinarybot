@@ -19,8 +19,11 @@ numpy==1.26.4
 # Technical indicators
 ta==0.11.0
 
-# HTTP requests (Telegram API)
+# HTTP requests (Telegram API + scraper)
 requests==2.31.0
+
+# HTML parsing (ForexFactory scraper)
+beautifulsoup4==4.12.3
 
 # Environment variables
 python-dotenv==1.0.0
