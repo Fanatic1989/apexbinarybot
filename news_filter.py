@@ -10,7 +10,7 @@ import logging
 import time
 import threading
 import json
-import os  # <-- added for binary path detection
+import os  # for binary path detection
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 
@@ -103,6 +103,9 @@ class ForexFactoryScraper:
             raise RuntimeError("Selenium not available")
 
         chrome_bin = self._find_chrome_binary()
+        if not os.path.exists(chrome_bin):
+            raise FileNotFoundError(f"Chrome binary missing: {chrome_bin}")
+
         log.info(f"Using Chrome binary: {chrome_bin}")
 
         options = uc.ChromeOptions()
@@ -111,11 +114,11 @@ class ForexFactoryScraper:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
-        options.binary_location = chrome_bin
 
         driver = None
         try:
-            driver = uc.Chrome(options=options)
+            # Pass binary path to the driver constructor (not via options)
+            driver = uc.Chrome(options=options, browser_executable_path=chrome_bin)
             driver.get(self.CALENDAR_URL)
             wait = WebDriverWait(driver, 15)
 
