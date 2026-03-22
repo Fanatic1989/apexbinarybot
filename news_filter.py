@@ -1,8 +1,8 @@
 """
 Economic News Filter — Forex Factory (primary) + static fallback
 
-FMP has been removed — their free endpoints are fully blocked (402/403).
-Forex Factory JSON feed is free, no API key, and works from any server.
+FF JSON uses "country" for the currency code, not "currency".
+Fetch interval raised to 12h to avoid 429 rate limiting.
 
 Blocking rules:
   - Weekends:  synthetics always trade, forex always blocked
@@ -40,10 +40,12 @@ FF_HEADERS = {
 def fetch_forex_factory() -> List[Dict]:
     """
     Fetch this week + next week from Forex Factory's public JSON feed.
-    nextweek returns 404 outside its availability window — that is silently skipped.
 
-    Returns normalised event dicts:
-        timestamp (datetime, UTC), currency, impact, event, source
+    IMPORTANT: FF JSON uses "country" as the currency code field, not "currency".
+    e.g. {"country": "USD", "title": "NFP", "impact": "High", "date": "..."}
+
+    nextweek 404s outside its window — silently skipped.
+    429 rate limit — logged as warning, cached data remains in use.
     """
     events = []
 
@@ -52,20 +54,24 @@ def fetch_forex_factory() -> List[Dict]:
             r = requests.get(FF_URLS[key], headers=FF_HEADERS, timeout=10)
 
             if r.status_code == 404:
-                log.debug(f"[FF] {key} not available yet (404) — skipping")
+                log.debug(f"[FF] {key} not available (404) — skipping")
+                continue
+
+            if r.status_code == 429:
+                log.warning(f"[FF] Rate limited (429) on {key} — using cached data")
                 continue
 
             r.raise_for_status()
             raw = r.json()
 
             if not isinstance(raw, list):
-                log.warning(f"[FF] {key} returned unexpected format: {type(raw)}")
+                log.warning(f"[FF] {key} unexpected format: {type(raw)}")
                 continue
 
+            week_count = 0
             for item in raw:
-                impact_raw = item.get("impact", "")
-                # FF uses title-case: "High", "Medium", "Low", "Holiday"
-                if impact_raw not in ("High", "Medium"):
+                impact = item.get("impact", "")
+                if impact not in ("High", "Medium"):
                     continue
 
                 date_str = item.get("date", "")
@@ -80,18 +86,27 @@ def fetch_forex_factory() -> List[Dict]:
                     log.debug(f"[FF] Bad date: {date_str}")
                     continue
 
+                # FF uses "country" for the currency code (USD, EUR, GBP etc.)
+                currency = (
+                    item.get("country") or
+                    item.get("currency") or
+                    ""
+                ).strip().upper()
+
                 events.append({
                     "timestamp": event_dt,
-                    "currency":  item.get("currency", ""),
-                    "impact":    impact_raw,   # keep title-case ("High"/"Medium")
+                    "currency":  currency,
+                    "impact":    impact,
                     "event":     item.get("title", item.get("name", "Unknown")),
                     "source":    "forex_factory",
                 })
+                week_count += 1
+
+            log.info(f"[FF] {key}: {week_count} High/Medium events loaded")
 
         except Exception as e:
             log.warning(f"[FF] Fetch failed for {key}: {e}")
 
-    log.info(f"[FF] Loaded {len(events)} High/Medium events")
     return events
 
 
@@ -125,10 +140,10 @@ class NewsFilter:
     MAJOR_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"]
 
     def __init__(self):
-        self._enabled:         bool              = True
-        self._dynamic_events:  List[Dict]        = []
-        self._last_update:     Optional[datetime] = None
-        self._lock             = threading.Lock()
+        self._enabled:        bool               = True
+        self._dynamic_events: List[Dict]         = []
+        self._last_update:    Optional[datetime] = None
+        self._lock            = threading.Lock()
         self._update_events()
 
     # ── FETCH ──────────────────────────────────────────────────
@@ -138,7 +153,11 @@ class NewsFilter:
             events = fetch_forex_factory()
 
             if not events:
-                log.warning("[NEWS] FF returned no events — static fallback only")
+                # Don't wipe existing cache if fetch returned nothing (e.g. 429)
+                if self._last_update is not None:
+                    log.warning("[NEWS] FF returned nothing — keeping cached data")
+                else:
+                    log.warning("[NEWS] FF returned nothing — static fallback only")
                 return
 
             with self._lock:
@@ -149,18 +168,17 @@ class NewsFilter:
 
         except Exception as e:
             log.error(f"[NEWS] Update error: {e}")
-            if self._last_update is None:
-                log.warning("[NEWS] No data yet — static fallback only")
 
-    def update_events_loop(self, interval_hours: float = 6):
+    def update_events_loop(self, interval_hours: float = 12):
+        """Refresh every 12h — FF rate-limits aggressive polling."""
         while True:
-            self._update_events()
             time.sleep(interval_hours * 3600)
+            self._update_events()
 
     def start_background_updater(self):
         t = threading.Thread(target=self.update_events_loop, daemon=True)
         t.start()
-        log.info("[NEWS] Background updater started (6h interval)")
+        log.info("[NEWS] Background updater started (12h interval)")
 
     # ── WINDOW HELPERS ─────────────────────────────────────────
 
@@ -172,7 +190,7 @@ class NewsFilter:
 
             buffer = 30 if event["impact"] == "High" else 15
 
-            # Skip events that have fully expired (end window passed)
+            # Skip if the entire window (pre + post buffer) has passed
             if event_dt + timedelta(minutes=buffer) < now:
                 return None
 
@@ -221,7 +239,6 @@ class NewsFilter:
             with self._lock:
                 events = self._dynamic_events[:]
 
-            # Dynamic events (FF)
             for event in events:
                 window = self._event_to_window(event, now)
                 if not window:
@@ -247,13 +264,10 @@ class NewsFilter:
             for (wd, sh, sm, eh, em, currencies, impact, label) in self.STATIC_WINDOWS:
                 if wd is not None and weekday != wd:
                     continue
-
                 start = sh * 60 + sm
                 end   = eh * 60 + em
-
                 if not self._is_within_window(start, end, now_min):
                     continue
-
                 if is_synth:
                     if label not in ("NFP / Payrolls", "FOMC Window"):
                         continue
@@ -261,7 +275,6 @@ class NewsFilter:
                     if "ALL" not in currencies:
                         if not any(c in currencies for c in affected):
                             continue
-
                 return True, f"📰 {label} ({impact}) [static]"
 
             return False, ""
@@ -274,10 +287,10 @@ class NewsFilter:
 
     def get_upcoming_events(self, hours: float = 8) -> List[Dict]:
         """
-        Return upcoming High/Medium events within the next `hours` window.
-        Sorted by soonest first, capped at 10.
+        Return upcoming High/Medium events within the next `hours`.
+        Sorted soonest first, capped at 10.
         """
-        now = datetime.now(timezone.utc)
+        now    = datetime.now(timezone.utc)
         cutoff = now + timedelta(hours=hours)
         upcoming = []
 
@@ -288,21 +301,15 @@ class NewsFilter:
             event_dt = event.get("timestamp")
             if not event_dt:
                 continue
-
-            # Only future events
-            if event_dt <= now:
+            if event_dt <= now or event_dt > cutoff:
                 continue
 
-            if event_dt > cutoff:
-                continue
-
-            delta_mins = (event_dt - now).total_seconds() / 60
-
+            delta_mins = int((event_dt - now).total_seconds() / 60)
             upcoming.append({
                 "title":     event["event"],
                 "currency":  event["currency"],
                 "impact":    event["impact"],
-                "mins_away": int(delta_mins),
+                "mins_away": delta_mins,
                 "source":    event.get("source", "forex_factory"),
             })
 
