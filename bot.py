@@ -329,22 +329,29 @@ def _parallel_scan(markets):
         log.debug("[BOT] No confirmed signals this scan")
         return
 
-    # ── Dominant direction filter ─────────────────────────────
+    # ── Dominant direction filter — confidence-weighted ──────────
+    # HIGH confidence signal = 2 votes, NORMAL = 1 vote
+    # Prevents a weak mid-zone NORMAL signal from overriding
+    # a strong outside-band HIGH signal in the opposite direction
     put_signals  = [s for s in signals_found if s[2].get("direction") == "PUT"]
     call_signals = [s for s in signals_found if s[2].get("direction") == "CALL"]
     total        = len(signals_found)
-    put_count    = len(put_signals)
-    call_count   = len(call_signals)
 
-    log.info(f"[BOT] {total} signal(s): {put_count} PUT / {call_count} CALL")
+    put_count  = sum(2 if s[2].get("confidence") == "high" else 1 for s in put_signals)
+    call_count = sum(2 if s[2].get("confidence") == "high" else 1 for s in call_signals)
+    put_raw    = len(put_signals)
+    call_raw   = len(call_signals)
 
-    if total >= 2 and put_count == call_count:
-        log.info(f"[BOT] ⚠️ Signals split {put_count}P/{call_count}C — "
-                 f"no dominant direction, skipping scan")
-        return
+    log.info(f"[BOT] {total} signal(s): {put_raw} PUT ({put_count}pts) / "
+             f"{call_raw} CALL ({call_count}pts)")
 
     if total < 2:
         log.info(f"[BOT] Only {total} confirmed signal — need 2+ to trade")
+        return
+
+    if put_count == call_count:
+        log.info(f"[BOT] ⚠️ Weighted votes tied {put_count}P/{call_count}C — "
+                 f"no dominant direction, skipping scan")
         return
 
     if put_count > call_count:
@@ -354,13 +361,16 @@ def _parallel_scan(markets):
         dominant  = call_signals
         direction = "CALL"
 
-    minority = call_count if direction == "PUT" else put_count
-    if minority >= len(dominant):
-        log.info(f"[BOT] No clear majority: {put_count}P/{call_count}C — skip")
+    dominant_pts = put_count  if direction == "PUT"  else call_count
+    minority_pts = call_count if direction == "PUT"  else put_count
+
+    # Require at least 2-point lead to trade — avoids razor-thin margins
+    if dominant_pts - minority_pts < 2:
+        log.info(f"[BOT] Margin too thin: {put_count}P vs {call_count}C — skip")
         return
 
-    log.info(f"[BOT] Dominant direction: {direction} "
-             f"({len(dominant)}/{total} signals agree)")
+    log.info(f"[BOT] Dominant: {direction} "
+             f"({dominant_pts}pts vs {minority_pts}pts)")
 
     dominant.sort(key=lambda x: x[0], reverse=True)
     best_score, best_market, best_signal, best_candles = dominant[0]
