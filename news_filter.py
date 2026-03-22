@@ -17,20 +17,33 @@ from bs4 import BeautifulSoup
 log = logging.getLogger(__name__)
 
 # ------------------------------------------------------------
-# ForexFactory scraper (embedded)
+# ForexFactory scraper (embedded, improved)
 # ------------------------------------------------------------
 class ForexFactoryScraper:
-    """Fetches economic calendar events from ForexFactory."""
+    """Fetches economic calendar events from ForexFactory using HTML or JSON."""
 
     BASE_URL = "https://www.forexfactory.com"
     CALENDAR_URL = f"{BASE_URL}/calendar"
     POST_URL = f"{BASE_URL}/calendar.php"
+    JSON_URL = f"{BASE_URL}/calendar/weekly-export.json"   # alternative JSON endpoint
 
+    # Realistic Chrome 120 headers
     HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html, */*; q=0.01",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    }
+
+    # Headers for AJAX POST (after initial GET)
+    AJAX_HEADERS = {
         "X-Requested-With": "XMLHttpRequest",
         "Origin": BASE_URL,
         "Referer": CALENDAR_URL,
@@ -50,32 +63,92 @@ class ForexFactoryScraper:
         self.token = None
 
     def _get_token(self) -> str:
-        resp = self.session.get(self.CALENDAR_URL)
-        resp.raise_for_status()
+        """Fetch the CSRF token from the main calendar page."""
+        try:
+            resp = self.session.get(self.CALENDAR_URL, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            log.error(f"Failed to fetch calendar page: {e}")
+            raise
+
         soup = BeautifulSoup(resp.text, "html.parser")
+        # Try input field first
         token_input = soup.find("input", {"name": "_token"})
-        if not token_input:
-            raise ValueError("CSRF token not found")
-        return token_input["value"]
+        if token_input:
+            return token_input["value"]
+
+        # Try meta tag (common in many apps)
+        meta_token = soup.find("meta", {"name": "csrf-token"})
+        if meta_token and meta_token.get("content"):
+            return meta_token["content"]
+
+        raise ValueError("CSRF token not found in page")
+
+    def _fetch_via_json(self, week: str) -> List[Dict]:
+        """Fallback: fetch JSON export directly (no token needed)."""
+        params = {"week": week}
+        try:
+            resp = self.session.get(self.JSON_URL, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            # The JSON structure is an array of events
+            # Each event has fields: date, time, currency, impact, title, etc.
+            events = []
+            for item in data:
+                impact = item.get("impact", "")
+                # Convert impact from numeric to text (e.g., "High", "Medium")
+                impact_map = {3: "High", 2: "Medium", 1: "Low", 0: "Non-Economic"}
+                impact_text = impact_map.get(impact, "Unknown")
+                events.append({
+                    "time": item.get("time", ""),
+                    "currency": item.get("currency", ""),
+                    "impact": impact_text,
+                    "event": item.get("title", ""),
+                })
+            return events
+        except Exception as e:
+            log.error(f"JSON fallback failed: {e}")
+            raise
 
     def _post_week(self, week: str) -> str:
+        """Attempt to get calendar via POST with token."""
         if self.token is None:
             self.token = self._get_token()
+
+        # Simulate a human delay
+        time.sleep(1.5)
+
+        # Add AJAX headers for this POST
+        self.session.headers.update(self.AJAX_HEADERS)
+
         data = {
             "_token": self.token,
             "week": week,
             "currencies[]": "all",
             "timezone": "GMT",
         }
-        resp = self.session.post(self.POST_URL, data=data)
-        resp.raise_for_status()
+
+        try:
+            resp = self.session.post(self.POST_URL, data=data, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning(f"POST request failed, trying JSON fallback: {e}")
+            # Reset headers before JSON fallback
+            self.session.headers.update(self.HEADERS)
+            raise  # will be caught in get_week
+        finally:
+            # Restore default headers for future GET requests
+            self.session.headers.update(self.HEADERS)
+
         return resp.text
 
     def _parse_html(self, html: str) -> List[Dict]:
+        """Parse the HTML table from the POST response."""
         soup = BeautifulSoup(html, "html.parser")
         table = soup.find("table", {"id": "calendarTable"})
         if not table:
             return []
+
         rows = table.find_all("tr", class_="calendar_row")
         events = []
         for row in rows:
@@ -83,18 +156,21 @@ class ForexFactoryScraper:
             currency_td = row.find("td", class_="calendar__currency")
             impact_td = row.find("td", class_="calendar__impact")
             event_td = row.find("td", class_="calendar__event")
-            # Optionally fetch actual/forecast/previous if needed
+
             if not all([time_td, currency_td, impact_td, event_td]):
                 continue
+
             time_str = time_td.get_text(strip=True)
             currency = currency_td.get_text(strip=True)
             impact_img = impact_td.find("img")
             impact = "Unknown"
             if impact_img and impact_img.get("alt"):
-                impact = self.IMPACT_MAP.get(impact_img["alt"].strip(), "Unknown")
+                alt = impact_img["alt"].strip()
+                impact = self.IMPACT_MAP.get(alt, "Unknown")
             event = event_td.get_text(strip=True)
+
             events.append({
-                "time": time_str,      # e.g. "12:30pm" or "All Day"
+                "time": time_str,
                 "currency": currency,
                 "impact": impact,
                 "event": event,
@@ -102,8 +178,18 @@ class ForexFactoryScraper:
         return events
 
     def get_week(self, week: str = "thisweek") -> List[Dict]:
-        html = self._post_week(week)
-        return self._parse_html(html)
+        """Get events for a week. Uses POST first, falls back to JSON."""
+        try:
+            html = self._post_week(week)
+            events = self._parse_html(html)
+            if events:
+                return events
+            # If no events parsed, try JSON as fallback
+            log.info("No events from HTML, trying JSON fallback")
+            return self._fetch_via_json(week)
+        except Exception as e:
+            log.warning(f"HTML scraping failed, trying JSON fallback: {e}")
+            return self._fetch_via_json(week)
 
     def get_current_week(self) -> List[Dict]:
         return self.get_week("thisweek")
@@ -113,7 +199,7 @@ class ForexFactoryScraper:
 
 
 # ------------------------------------------------------------
-# Main NewsFilter class (now dynamic)
+# Main NewsFilter class (dynamic events)
 # ------------------------------------------------------------
 class NewsFilter:
     """
@@ -123,14 +209,13 @@ class NewsFilter:
     - Synthetics blocked only for High impact events (any currency)
     """
 
-    # Static fallback windows for regular market openings (optional)
-    # These are used only if no dynamic events are available.
+    # Static fallback windows (used only when no dynamic events available)
     STATIC_WINDOWS = [
         (None, 7, 45, 8, 30, ["EUR","GBP","CHF"], "high", "London Open"),
         (None, 12, 15, 14, 0, ["USD","CAD"], "high", "NY Open"),
         (0, 0, 0, 2, 0, ["ALL"], "medium", "Monday Open"),
         (1, 13, 30, 14, 30, ["USD"], "medium", "USD Tuesday"),
-        (2, 12, 0, 13, 0, ["USD"], "high", "ADP Employment"),   # might be redundant with dynamic
+        (2, 12, 0, 13, 0, ["USD"], "high", "ADP Employment"),
         (2, 18, 45, 20, 30, ["USD"], "high", "FOMC Window"),
         (3, 12, 0, 13, 30, ["USD","EUR"], "high", "ECB / Jobless Claims"),
         (4, 12, 0, 14, 0, ["USD"], "high", "NFP / Payrolls"),
@@ -139,12 +224,12 @@ class NewsFilter:
 
     # Map each forex pair to its two currencies
     MARKET_CURRENCIES = {
-        "frxEURUSD":["EUR","USD"], "frxGBPUSD":["GBP","USD"],
-        "frxUSDJPY":["USD","JPY"], "frxAUDUSD":["AUD","USD"],
-        "frxUSDCAD":["USD","CAD"], "frxUSDCHF":["USD","CHF"],
-        "frxEURGBP":["EUR","GBP"], "frxEURJPY":["EUR","JPY"],
-        "frxGBPJPY":["GBP","JPY"], "frxXAUUSD":["USD","XAU"],
-        "frxXAGUSD":["USD","XAG"],
+        "frxEURUSD": ["EUR","USD"], "frxGBPUSD": ["GBP","USD"],
+        "frxUSDJPY": ["USD","JPY"], "frxAUDUSD": ["AUD","USD"],
+        "frxUSDCAD": ["USD","CAD"], "frxUSDCHF": ["USD","CHF"],
+        "frxEURGBP": ["EUR","GBP"], "frxEURJPY": ["EUR","JPY"],
+        "frxGBPJPY": ["GBP","JPY"], "frxXAUUSD": ["USD","XAU"],
+        "frxXAGUSD": ["USD","XAG"],
     }
 
     def __init__(self):
@@ -168,6 +253,9 @@ class NewsFilter:
             log.info(f"Updated dynamic events: {len(events)} fetched")
         except Exception as e:
             log.error(f"Failed to update events: {e}")
+            # Do not clear existing events; keep the last known data
+            if self._last_update is None:
+                log.warning("No events available, will use static windows.")
 
     def update_events_loop(self, interval_hours=24):
         """Run in a background thread to refresh events periodically."""
@@ -197,7 +285,6 @@ class NewsFilter:
         """
         time_str = event["time"]
         if time_str == "All Day":
-            # For all-day events, we could block the whole day, but usually they are non-economic
             return None
         try:
             # Parse time like "12:30pm" -> 12:30 in 24h format
@@ -206,13 +293,10 @@ class NewsFilter:
             # If the event time is earlier than now, assume it's for tomorrow (if within next 24h)
             if event_dt < now:
                 event_dt += timedelta(days=1)
-            # We'll create a window from 15 minutes before to 15 minutes after the event time
+            # Create a window 15 minutes before and after the event
             start_min = (event_dt - timedelta(minutes=15)).hour * 60 + (event_dt - timedelta(minutes=15)).minute
             end_min   = (event_dt + timedelta(minutes=15)).hour * 60 + (event_dt + timedelta(minutes=15)).minute
-            # For simplicity, we treat window as same day (no overnight) – adjust if needed
-            if start_min > end_min:
-                # Window crosses midnight; we'll handle by splitting in two windows, but for simplicity skip
-                pass
+            # If window crosses midnight, we handle it in _is_within_window
             return (start_min, end_min, event["currency"], event["impact"])
         except Exception as e:
             log.debug(f"Error parsing event time {time_str}: {e}")
@@ -261,7 +345,6 @@ class NewsFilter:
 
                 # Forex: block if any currency matches and impact is at least Medium
                 if impact in ("High", "Medium"):
-                    # Check if any of affected_currencies is in the event's currency list
                     # Event currency can be e.g., "USD", or "EUR,GBP" (comma separated)
                     event_currencies = [c.strip() for c in event["currency"].split(",")]
                     if any(c in event_currencies for c in affected_currencies):
@@ -318,11 +401,12 @@ class NewsFilter:
         return sorted(upcoming, key=lambda x: x["mins_away"])[:6]
 
     def disable(self):
-        global _enabled
-        _enabled = False
+        """Disable news filtering."""
+        self._enabled = False
+
     def enable(self):
-        global _enabled
-        _enabled = True
+        """Enable news filtering."""
+        self._enabled = True
 
 
 # Singleton instance for easy import
