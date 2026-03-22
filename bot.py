@@ -39,6 +39,137 @@ SESSION_2_HOURS = 11
 MAX_TRADES_S1   = 55
 MAX_TRADES_S2   = 45
 
+# ─────────────────────────────────────────
+# MINIMUM PAYOUT RATIO PER RISK LEVEL
+# ─────────────────────────────────────────
+# If you lose $10, the next win must return at least:
+#   1% risk → $15  (1.5x)
+#   2% risk → $17.50 (1.75x)
+#   3% risk → $20  (2.0x)
+#
+# Deriv payout = stake + profit, so:
+#   min_payout_ratio = (stake + min_profit) / stake
+#   1% → profit >= 1.5x stake  → payout ratio >= 2.5
+#   2% → profit >= 1.75x stake → payout ratio >= 2.75
+#   3% → profit >= 2.0x stake  → payout ratio >= 3.0
+#
+# In practice Deriv binary payouts are expressed as total payout / stake:
+#   e.g. stake=$10, payout=$18 → ratio=1.8 → profit=$8 (0.8x stake)
+# We use profit/stake (not payout/stake) for the ratio check.
+
+MIN_PROFIT_RATIO = {
+    1: 1.5,   # 1% risk: profit must be >= 1.5x stake
+    2: 1.75,  # 2% risk: profit must be >= 1.75x stake
+    3: 2.0,   # 3% risk: profit must be >= 2.0x stake
+}
+
+
+def _get_min_profit_ratio() -> float:
+    """Return the minimum profit/stake ratio for the current risk setting."""
+    risk_pct = int(getattr(config, "STAKE_PERCENT", 1))
+    return MIN_PROFIT_RATIO.get(risk_pct, 1.5)
+
+
+def _check_payout_ratio(market: str, direction: str,
+                        stake: float, expiry: int) -> tuple:
+    """
+    Fetch a Deriv proposal for this trade and check if the payout ratio
+    meets the minimum recovery threshold for the current risk level.
+
+    Returns:
+        (passes: bool, profit: float, ratio: float, reason: str)
+
+    Uses get_proposal from deriv_api if available, otherwise falls back
+    to a direct websocket call.
+    """
+    min_ratio = _get_min_profit_ratio()
+
+    try:
+        # Try to use get_proposal from deriv_api if it exists
+        from deriv_api import get_proposal
+        proposal = get_proposal(
+            symbol=market,
+            direction=direction,
+            stake=stake,
+            duration_minutes=expiry
+        )
+    except (ImportError, AttributeError):
+        # get_proposal not in deriv_api yet — use direct websocket call
+        proposal = _fetch_proposal_direct(market, direction, stake, expiry)
+
+    if not proposal:
+        # Can't verify payout — allow trade but log warning
+        log.warning(f"[{market}] Could not fetch proposal — skipping payout check")
+        return True, 0.0, 0.0, "proposal_unavailable"
+
+    payout = float(proposal.get("payout", 0))
+    if payout <= 0:
+        return False, 0.0, 0.0, f"invalid payout ${payout:.2f}"
+
+    profit = payout - stake
+    ratio  = profit / stake if stake > 0 else 0
+
+    passes = ratio >= min_ratio
+    reason = (
+        f"profit=${profit:.2f} ratio={ratio:.2f}x "
+        f"(need {min_ratio:.2f}x for {int(getattr(config,'STAKE_PERCENT',1))}% risk)"
+    )
+
+    return passes, profit, ratio, reason
+
+
+def _fetch_proposal_direct(market: str, direction: str,
+                           stake: float, expiry: int) -> dict:
+    """
+    Fallback: fetch a proposal directly via websocket if deriv_api
+    doesn't expose get_proposal yet.
+    """
+    import websocket as _ws
+    import json as _json
+
+    contract_type = "CALL" if direction == "CALL" else "PUT"
+    ws = None
+    try:
+        url = (f"wss://ws.derivws.com/websockets/v3"
+               f"?app_id={config.DERIV_APP_ID}")
+        ws = _ws.create_connection(url, timeout=10)
+
+        # Authorise
+        ws.send(_json.dumps({"authorize": config.ACTIVE_TOKEN}))
+        auth = _json.loads(ws.recv())
+        if "error" in auth:
+            log.warning(f"[PROPOSAL] Auth failed: {auth['error']['message']}")
+            return {}
+
+        # Request proposal
+        ws.send(_json.dumps({
+            "proposal":       1,
+            "amount":         stake,
+            "basis":          "stake",
+            "contract_type":  contract_type,
+            "currency":       "USD",
+            "duration":       expiry,
+            "duration_unit":  "m",
+            "symbol":         market,
+        }))
+        resp = _json.loads(ws.recv())
+
+        if "error" in resp:
+            log.debug(f"[PROPOSAL] {market} error: {resp['error']['message']}")
+            return {}
+
+        return resp.get("proposal", {})
+
+    except Exception as e:
+        log.debug(f"[PROPOSAL] {market} fetch failed: {e}")
+        return {}
+    finally:
+        if ws:
+            try: ws.close()
+            except: pass
+
+
+# ─────────────────────────────────────────
 
 def run_bot():
     global risk_manager, staking_engine, _session_trades
@@ -65,7 +196,7 @@ def run_bot():
     staking_engine = StakingEngine(base_stake=base_stake, balance=balance)
 
     import bot as _s
-    _s.risk_manager = risk_manager
+    _s.risk_manager   = risk_manager
     _s.staking_engine = staking_engine
 
     log.info(f"[BOT] Connected | Balance: ${balance:.2f} | Stake: ${base_stake:.2f}")
@@ -147,13 +278,11 @@ def _parallel_scan(markets):
     """
     Scan all markets simultaneously for signals.
     Collect ALL signals then trade only the SINGLE best one.
-    This prevents multiple simultaneous trades that compound losses.
     """
     signals_found = []
     signals_lock  = threading.Lock()
 
     def _scan_for_signal(market):
-        """Scan market and return signal if found — don't trade yet."""
         try:
             if time.time() < _market_paused.get(market, 0):
                 return
@@ -166,15 +295,14 @@ def _parallel_scan(markets):
             if not candles or len(candles) < 40:
                 return
             signal = analyze_market(candles, market)
-            # Update last_signals for dashboard
             import bot as _b
             _b.last_signals = [s for s in _b.last_signals if s.get("market") != market]
             if signal and signal.get("direction") != "NONE":
                 _b.last_signals.append({
                     "market":     market,
-                    "direction":  signal.get("direction","NONE"),
-                    "confidence": signal.get("confidence","low"),
-                    "strategy":   signal.get("strategy","—"),
+                    "direction":  signal.get("direction", "NONE"),
+                    "confidence": signal.get("confidence", "low"),
+                    "strategy":   signal.get("strategy", "—"),
                     "timestamp":  datetime.utcnow().strftime("%H:%M:%S")
                 })
                 if len(_b.last_signals) > 40:
@@ -183,14 +311,12 @@ def _parallel_scan(markets):
                 return
             if signal.get("direction") == "NONE":
                 return
-            # Score signals: HIGH=2, NORMAL=1
             score = 2 if signal.get("confidence") == "high" else 1
             with signals_lock:
                 signals_found.append((score, market, signal, candles))
         except Exception as e:
             log.error(f"[{market}] Scan error: {e}")
 
-    # Scan all markets simultaneously
     max_workers = min(8, len(markets))
     with ThreadPoolExecutor(max_workers=max_workers,
                             thread_name_prefix="Scan") as ex:
@@ -207,33 +333,23 @@ def _parallel_scan(markets):
         log.debug("[BOT] No confirmed signals this scan")
         return
 
-    # ── Dominant direction filter ────────────────────────────────
-    # Count PUT vs CALL signals across all markets
-    # If signals disagree, the market has no clear bias — skip
-    # Only trade when majority of signals agree on direction
     put_signals  = [s for s in signals_found if s[2].get("direction") == "PUT"]
     call_signals = [s for s in signals_found if s[2].get("direction") == "CALL"]
     total        = len(signals_found)
-
-    put_count  = len(put_signals)
-    call_count = len(call_signals)
+    put_count    = len(put_signals)
+    call_count   = len(call_signals)
 
     log.info(f"[BOT] {total} signal(s): {put_count} PUT / {call_count} CALL")
 
-    # If signals are split 50/50 — market has no dominant direction
-    # This is the exact pattern causing 50% win rate
     if total >= 2 and put_count == call_count:
         log.info(f"[BOT] ⚠️ Signals split {put_count}P/{call_count}C — "
                  f"no dominant direction, skipping scan")
         return
 
-    # Require minimum 2 confirmed signals to trade
-    # A lone signal with no corroboration is unreliable
     if total < 2:
         log.info(f"[BOT] Only {total} confirmed signal — need 2+ to trade")
         return
 
-    # Only trade in the dominant direction
     if put_count > call_count:
         dominant  = put_signals
         direction = "PUT"
@@ -241,7 +357,6 @@ def _parallel_scan(markets):
         dominant  = call_signals
         direction = "CALL"
 
-    # Dominant direction must have clear majority (not 1 vs 1)
     minority = call_count if direction == "PUT" else put_count
     if minority >= len(dominant):
         log.info(f"[BOT] No clear majority: {put_count}P/{call_count}C — skip")
@@ -250,31 +365,26 @@ def _parallel_scan(markets):
     log.info(f"[BOT] Dominant direction: {direction} "
              f"({len(dominant)}/{total} signals agree)")
 
-    # Pick best signal from dominant direction only
     dominant.sort(key=lambda x: x[0], reverse=True)
     best_score, best_market, best_signal, best_candles = dominant[0]
 
     log.info(f"[BOT] Trading best {direction}: {best_market} "
              f"{best_signal.get('confidence','').upper()}")
 
-    # Trade ONLY the best signal in dominant direction
     _scan_market(best_market, best_signal)
 
 
 def _scan_market(market, signal=None):
     global _session_trades
 
-    # Cooldown check
     if time.time() < _market_paused.get(market, 0):
         return
 
-    # Per-market lock — no duplicate trades on same market
     lock = _market_locks.setdefault(market, threading.Lock())
     if not lock.acquire(blocking=False):
         return
 
     try:
-        # Use pre-analyzed signal if provided, otherwise analyze now
         if signal is None:
             candles = get_candles(market)
             if not candles or len(candles) < 40:
@@ -293,9 +403,31 @@ def _scan_market(market, signal=None):
         strategy   = signal.get("strategy", "unknown")
         expiry     = config.get_expiry(market)
 
-        # Thread-safe stake calculation
         with _global_lock:
             stake = staking_engine.get_stake() if staking_engine else 0.35
+
+        # ── PAYOUT RATIO CHECK ────────────────────────────────
+        # Before placing any trade, verify the payout meets the
+        # minimum recovery ratio for the current risk level.
+        passes, exp_profit, ratio, reason = _check_payout_ratio(
+            market, direction, stake, expiry
+        )
+
+        min_ratio = _get_min_profit_ratio()
+        risk_pct  = int(getattr(config, "STAKE_PERCENT", 1))
+
+        if not passes:
+            log.info(
+                f"[{market}] ⛔ Payout too low — {reason} "
+                f"| Risk {risk_pct}% needs {min_ratio:.2f}x min — SKIPPING"
+            )
+            return
+
+        log.info(
+            f"[{market}] ✅ Payout OK — {reason} "
+            f"| Expected profit: ${exp_profit:.2f}"
+        )
+        # ─────────────────────────────────────────────────────
 
         log.info(f"[{market}] ⚡ {direction} | {confidence.upper()} | "
                  f"Strategy: {strategy} | Expiry: {expiry}m | Stake: ${stake:.2f}")
@@ -303,16 +435,15 @@ def _scan_market(market, signal=None):
         send_signal(market=market, direction=direction,
                     expiry=expiry, confidence=confidence, stake=stake)
 
-        # Place trade
         trade = place_trade(symbol=market, direction=direction,
-                           stake=stake, duration_minutes=expiry)
+                            stake=stake, duration_minutes=expiry)
         if not trade:
             log.error(f"[{market}] Trade placement failed")
             return
 
-        contract_id  = trade["contract_id"]
-        actual_stake = trade.get("stake", stake)
-        actual_payout= trade.get("payout", 0)
+        contract_id   = trade["contract_id"]
+        actual_stake  = trade.get("stake",  stake)
+        actual_payout = trade.get("payout", 0)
 
         with _session_lock:
             _session_trades += 1
@@ -320,12 +451,11 @@ def _scan_market(market, signal=None):
 
         log.info(f"[{market}] Trade #{tc} placed — contract #{contract_id}")
 
-        # Save immediately as OPEN for dashboard timer
         _save_trade({
             "contract_id": contract_id,
             "symbol":      market,
             "direction":   direction,
-            "stake":       round(float(actual_stake), 2),
+            "stake":       round(float(actual_stake),  2),
             "payout":      round(float(actual_payout), 2),
             "result":      "open",
             "profit":      0,
@@ -334,13 +464,10 @@ def _scan_market(market, signal=None):
             "strategy":    strategy,
         })
 
-        # Wait for settlement — NON-BLOCKING for other markets
-        # This thread waits but other market threads continue scanning
         _wait_for_settlement(expiry, market)
 
-        # Get result with retries
-        outcome = None
-        max_polls  = 20 if market.startswith("frx") or market.startswith("frx") else 12
+        outcome    = None
+        max_polls  = 20 if market.startswith("frx") else 12
         poll_sleep = 15 if market.startswith("frx") else 8
 
         for attempt in range(max_polls):
@@ -349,7 +476,7 @@ def _scan_market(market, signal=None):
             except Exception as pe:
                 log.warning(f"[{market}] Poll error {attempt+1}: {pe}")
                 outcome = None
-            if outcome and outcome.get("status") in ("won","lost"):
+            if outcome and outcome.get("status") in ("won", "lost"):
                 log.info(f"[{market}] #{contract_id} settled: "
                          f"{outcome['status'].upper()} on poll {attempt+1}")
                 break
@@ -357,9 +484,9 @@ def _scan_market(market, signal=None):
                      f"poll {attempt+1}/{max_polls} in {poll_sleep}s")
             time.sleep(poll_sleep)
 
-        if outcome and outcome.get("status") in ("won","lost"):
+        if outcome and outcome.get("status") in ("won", "lost"):
             _handle_outcome(market, direction, actual_stake,
-                           outcome, trade, signal)
+                            outcome, trade, signal)
         else:
             log.error(f"[{market}] No result after {max_polls} polls")
             _update_trade(contract_id, {"result": "unresolved"})
@@ -377,10 +504,9 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
     expiry      = signal.get("expiry", config.get_expiry(market))
     payout      = trade.get("payout", 0)
 
-    # Update trade record
     _update_trade(contract_id, {
         "result": status,
-        "profit": round(profit if status=="won" else -stake, 2),
+        "profit": round(profit if status == "won" else -stake, 2),
     })
 
     import bot as _b
@@ -408,7 +534,6 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
         try: record_trade_outcome(market, strategy, "lost")
         except: pass
 
-        # Per-market cooldown
         _b._market_losses[market] = _b._market_losses.get(market, 0) + 1
         if _b._market_losses[market] >= 2:
             resume = time.time() + _b._MARKET_PAUSE_S
@@ -437,37 +562,36 @@ def _save_trade(trade):
         try:
             with open(history_file) as f: data = json.load(f)
         except: data = empty.copy()
-        for k,v in empty.items():
+        for k, v in empty.items():
             if k not in data: data[k] = v
 
-        # Prevent duplicates
-        cid = str(trade.get("contract_id",""))
+        cid = str(trade.get("contract_id", ""))
         if cid and cid != "—":
             for ex in data["trades"]:
-                if str(ex.get("contract_id","")) == cid:
+                if str(ex.get("contract_id", "")) == cid:
                     ex.update(trade)
-                    with open(history_file,"w") as f: json.dump(data,f,indent=2)
+                    with open(history_file, "w") as f: json.dump(data, f, indent=2)
                     return
 
         data["trades"].append(trade)
-        data["total_trades"] = data.get("total_trades",0) + 1
+        data["total_trades"] = data.get("total_trades", 0) + 1
         if trade.get("result") == "won":
-            data["total_wins"] = data.get("total_wins",0) + 1
-            data["net_pnl"]    = round(data.get("net_pnl",0) + abs(trade["profit"]),2)
+            data["total_wins"] = data.get("total_wins", 0) + 1
+            data["net_pnl"]    = round(data.get("net_pnl", 0) + abs(trade["profit"]), 2)
         elif trade.get("result") == "lost":
-            data["total_losses"] = data.get("total_losses",0) + 1
-            data["net_pnl"]      = round(data.get("net_pnl",0) - trade["stake"],2)
+            data["total_losses"] = data.get("total_losses", 0) + 1
+            data["net_pnl"]      = round(data.get("net_pnl", 0) - trade["stake"], 2)
 
         if len(data["trades"]) > 500:
             data["trades"] = data["trades"][-500:]
-        with open(history_file,"w") as f: json.dump(data,f,indent=2)
+        with open(history_file, "w") as f: json.dump(data, f, indent=2)
         log.info(f"[HISTORY] Saved {trade['symbol']} {trade['direction']} "
                  f"{trade.get('result','open').upper()}")
     except Exception as e:
         log.error(f"[HISTORY] Save failed: {e}")
         try:
-            with open("trade_emergency.log","a") as ef:
-                ef.write(json.dumps(trade)+"\n")
+            with open("trade_emergency.log", "a") as ef:
+                ef.write(json.dumps(trade) + "\n")
         except: pass
 
 
@@ -477,20 +601,20 @@ def _update_trade(contract_id, updates):
         with open(history_file) as f: data = json.load(f)
         updated = False
         for t in data["trades"]:
-            if str(t.get("contract_id","")) == str(contract_id):
+            if str(t.get("contract_id", "")) == str(contract_id):
                 t.update(updates)
                 updated = True
                 break
         if updated:
-            result = updates.get("result","")
-            profit = float(updates.get("profit",0))
+            result = updates.get("result", "")
+            profit = float(updates.get("profit", 0))
             if result == "won":
-                data["total_wins"]   = data.get("total_wins",0) + 1
-                data["net_pnl"]      = round(data.get("net_pnl",0) + abs(profit),2)
+                data["total_wins"] = data.get("total_wins", 0) + 1
+                data["net_pnl"]    = round(data.get("net_pnl", 0) + abs(profit), 2)
             elif result == "lost":
-                data["total_losses"] = data.get("total_losses",0) + 1
-                data["net_pnl"]      = round(data.get("net_pnl",0) + profit,2)
-            with open(history_file,"w") as f: json.dump(data,f,indent=2)
+                data["total_losses"] = data.get("total_losses", 0) + 1
+                data["net_pnl"]      = round(data.get("net_pnl", 0) + profit, 2)
+            with open(history_file, "w") as f: json.dump(data, f, indent=2)
             log.info(f"[HISTORY] Updated #{contract_id} → "
                      f"{updates.get('result','?').upper()}")
         else:
