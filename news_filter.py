@@ -10,7 +10,8 @@ import logging
 import time
 import threading
 import json
-import os  # for binary path detection
+import os
+import shutil  # <-- added for which()
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 
@@ -78,23 +79,32 @@ class ForexFactoryScraper:
 
     def _find_chrome_binary(self) -> str:
         """Return the path to Chrome/Chromium binary."""
-        # First check environment variable (set in render.yaml)
+        # 1. Check environment variable (if set)
         env_bin = os.environ.get('CHROME_BIN')
         if env_bin and os.path.exists(env_bin):
             return env_bin
 
-        # Common locations on Linux
+        # 2. Use shutil.which (searches PATH)
+        which_bin = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+        if which_bin:
+            return which_bin
+
+        # 3. Fallback: common absolute paths (Render uses /usr/bin/chromium)
         candidates = [
+            "/usr/bin/chromium",                # Correct for Render
             "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
+            "/snap/bin/chromium",
         ]
         for path in candidates:
             if os.path.exists(path):
                 return path
-        # If not found, fallback to default (will raise error later)
-        return "chromium-browser"
+
+        # 4. Last resort: raise a clear error
+        raise FileNotFoundError(
+            "Chromium/Chrome not found. Make sure 'chromium' is installed in render.yaml's apt.packages."
+        )
 
     def _fetch_via_selenium(self, week: str = "thisweek") -> List[Dict]:
         """Use Selenium to extract events when requests are blocked."""
