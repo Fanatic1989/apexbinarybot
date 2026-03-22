@@ -6,8 +6,7 @@ services:
     build:
       apt:
         packages:
-          - chromium-browser
-          - chromium-chromedriver
+          - chromium                     # correct package name
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120 --keep-alive 5
     envVars:
@@ -53,5 +52,4 @@ services:
         value: "INFO"
       - key: SIGNAL_ONLY
         value: "false"
-      - key: CHROME_BIN
-        value: "/usr/bin/chromium-browser"
+      # CHROME_BIN is removed; the scraper will find /usr/bin/chromium automatically
