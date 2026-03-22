@@ -31,3 +31,4 @@ python-dotenv==1.0.0
 # Web automation for ForexFactory fallback
 selenium==4.15.2
 undetected-chromedriver==3.5.4
+webdriver-manager==4.0.1
