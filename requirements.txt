@@ -27,3 +27,7 @@ beautifulsoup4==4.12.3
 
 # Environment variables
 python-dotenv==1.0.0
+
+# Web automation for ForexFactory fallback
+selenium==4.15.2
+undetected-chromedriver==3.5.4
