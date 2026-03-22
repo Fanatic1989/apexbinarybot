@@ -45,7 +45,10 @@ FF_IMPACT_MAP = {"High": "High", "Medium": "Medium", "Low": "Low"}
 
 def fetch_forex_factory() -> List[Dict]:
     """
-    Fetch this week + next week from Forex Factory's public JSON feed.
+    Fetch this week from Forex Factory's public JSON feed.
+    Also attempts next week — but that URL only exists Mon–Fri of the
+    preceding week, so a 404 is normal and silently skipped.
+
     Returns normalised event dicts with keys:
         timestamp (datetime, UTC), currency, impact, event (str), source
     """
@@ -54,6 +57,12 @@ def fetch_forex_factory() -> List[Dict]:
     for key in ("thisweek", "nextweek"):
         try:
             r = requests.get(FF_URLS[key], headers=FF_HEADERS, timeout=10)
+
+            # nextweek returns 404 outside its availability window — that's fine
+            if r.status_code == 404:
+                log.debug(f"[FF] {key} not available yet (404) — skipping")
+                continue
+
             r.raise_for_status()
             raw = r.json()
 
@@ -118,7 +127,8 @@ def fetch_fmp_news() -> List[Dict]:
         log.debug("[FMP] FMP_API_KEY not set — skipping FMP fetch")
         return []
 
-    url = "https://financialmodelingprep.com/stable/economic-calendar"
+    # v3 endpoint is available on the free FMP plan
+    url = "https://financialmodelingprep.com/api/v3/economic_calendar"
     params = {
         "from":   datetime.utcnow().strftime("%Y-%m-%d"),
         "to":     (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d"),
