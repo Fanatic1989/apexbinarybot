@@ -2,7 +2,7 @@ import os
 import json
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 
 from flask import Flask, jsonify, request, render_template, redirect, url_for, session
@@ -122,11 +122,31 @@ def status():
         "news_events":     _get_upcoming_news()
     })
 
+
 def _get_upcoming_news():
+    """
+    Fetch upcoming news events and normalise keys to match
+    what the dashboard JS buildNewsPanel() expects:
+      title, currency, impact (lowercase), time_utc, mins_away, source
+    """
     try:
         from news_filter import news_filter
-        return news_filter.get_upcoming_events(hours=4)
-    except:
+        raw = news_filter.get_upcoming_events(hours=4)
+        out = []
+        for e in raw:
+            mins = e.get("mins_away", 0)
+            eta  = datetime.now(timezone.utc) + timedelta(minutes=mins)
+            out.append({
+                "title":     e.get("title") or e.get("event") or "—",
+                "currency":  e.get("currency", ""),
+                "impact":    (e.get("impact") or "").lower(),
+                "time_utc":  eta.strftime("%H:%M UTC"),
+                "mins_away": mins,
+                "source":    e.get("source", ""),
+            })
+        return out
+    except Exception as ex:
+        log.debug(f"[SERVER] _get_upcoming_news error: {ex}")
         return []
 
 
@@ -379,7 +399,6 @@ def health():
     return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
 
 
-
 # ─────────────────────────────────────────
 # Route: Connection test (debug)
 # ─────────────────────────────────────────
@@ -389,14 +408,14 @@ def test_connection():
     """Test Deriv API connection and show exactly what is failing."""
     import websocket, json
     results = {
-        "app_id":     config.DERIV_APP_ID,
-        "mode":       config.MODE,
-        "token_set":  bool(config.ACTIVE_TOKEN),
+        "app_id":        config.DERIV_APP_ID,
+        "mode":          config.MODE,
+        "token_set":     bool(config.ACTIVE_TOKEN),
         "token_preview": config.ACTIVE_TOKEN[:6] + "..." if config.ACTIVE_TOKEN else "NOT SET",
-        "ws_url":     f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-        "auth_result": None,
-        "balance":    None,
-        "error":      None
+        "ws_url":        f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
+        "auth_result":   None,
+        "balance":       None,
+        "error":         None
     }
     try:
         ws = websocket.create_connection(results["ws_url"], timeout=10)
@@ -413,6 +432,7 @@ def test_connection():
         results["auth_result"] = "EXCEPTION"
         results["error"] = str(e)
     return jsonify(results)
+
 
 # ─────────────────────────────────────────
 # Watchdog — auto restart bot if it crashes
@@ -459,7 +479,6 @@ def _run_bot_safe():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
     log.info(f"[SERVER] Starting Flask on port {port}")
-    # Use threaded=True so bot thread and Flask run together
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True, use_reloader=False)
 
 # Gunicorn entry point
