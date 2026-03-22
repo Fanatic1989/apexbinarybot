@@ -2,10 +2,20 @@ import os
 import json
 import threading
 import logging
+import traceback
+import sys
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 
 from flask import Flask, jsonify, request, render_template, redirect, url_for, session
+
+# ── Diagnostic import wrapper — shows exact error in Render logs ──
+for _mod in ["config", "bot", "news_filter", "strategy", "strategy_ai", "sniper_filter"]:
+    try:
+        __import__(_mod)
+    except Exception as _e:
+        print(f"[STARTUP] IMPORT ERROR in '{_mod}': {_e}", file=sys.stderr, flush=True)
+        traceback.print_exc()
 
 import config
 import bot
