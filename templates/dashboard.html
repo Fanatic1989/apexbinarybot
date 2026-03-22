@@ -169,9 +169,9 @@
         <thead><tr>
           <th>Time (UTC)</th><th>Market</th><th>Type</th><th>Direction</th>
           <th>Expiry</th><th>Timer</th><th>Stake</th><th>Payout</th>
-          <th>Confidence</th><th>Result</th><th>P&amp;L</th>
+          <th>Strategy</th><th>Confidence</th><th>Result</th><th>P&amp;L</th>
         </tr></thead>
-        <tbody id="trade-tbody"><tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr></tbody>
+        <tbody id="trade-tbody"><tr><td colspan="12" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -358,7 +358,7 @@ function loadTrades(){
     const trades = (d.trades||[]).slice().reverse().slice(0,100);
     if(!trades.length){
       document.getElementById('trade-tbody').innerHTML =
-        '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr>';
+        '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr>';
       updateRecovery(currentRisk, []);
       return;
     }
@@ -403,6 +403,12 @@ function loadTrades(){
       const typePill=isF?badge('FOREX','rgba(167,139,250,0.1)','#a78bfa','rgba(167,139,250,0.25)'):badge('SYNTH','rgba(100,116,139,0.1)','#94a3b8','rgba(100,116,139,0.2)');
       const dirPill=t.direction==='CALL'?badge('▲ CALL','rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)'):badge('▼ PUT','rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)');
       const confPill=t.confidence==='high'?badge('🔥 HIGH','rgba(255,179,71,0.12)','#ffb347','rgba(255,179,71,0.3)'):badge('NORMAL','rgba(77,159,255,0.1)','#4d9fff','rgba(77,159,255,0.25)');
+      // Strategy pill — colour-coded by strategy type
+      const STRAT_NAMES={bb_bounce:'BB Bounce',rsi_reversal:'RSI Rev',false_breakout:'False Break',momentum_streak:'Momentum',fvg_retest:'FVG Retest',pivot_stochrsi:'Pivot/Stoch',ema_triple:'EMA Triple'};
+      const STRAT_COLORS={bb_bounce:['rgba(167,139,250,0.1)','#a78bfa','rgba(167,139,250,0.25)'],rsi_reversal:['rgba(0,245,160,0.08)','#00f5a0','rgba(0,245,160,0.2)'],false_breakout:['rgba(255,77,109,0.08)','#ff4d6d','rgba(255,77,109,0.2)'],momentum_streak:['rgba(255,179,71,0.08)','#ffb347','rgba(255,179,71,0.2)'],fvg_retest:['rgba(77,159,255,0.08)','#4d9fff','rgba(77,159,255,0.2)'],pivot_stochrsi:['rgba(16,185,129,0.08)','#10b981','rgba(16,185,129,0.2)'],ema_triple:['rgba(244,114,182,0.08)','#f472b6','rgba(244,114,182,0.2)']};
+      const sName=t.strategy||'unknown';
+      const sc=STRAT_COLORS[sName]||['rgba(100,116,139,0.08)','#94a3b8','rgba(100,116,139,0.2)'];
+      const stratPill=badge(STRAT_NAMES[sName]||sName,sc[0],sc[1],sc[2]);
       const resPill=won?badge('✓ WIN','rgba(0,245,160,0.12)','#00f5a0','rgba(0,245,160,0.3)'):
                    lost?badge('✗ LOSS','rgba(255,77,109,0.12)','#ff4d6d','rgba(255,77,109,0.3)'):
                    `<span id="rc-${cid}" data-state="open" style="display:inline-block;background:rgba(100,116,139,0.1);color:#64748b;border:1px solid rgba(100,116,139,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px">— OPEN</span>`;
@@ -430,6 +436,7 @@ function loadTrades(){
         <td id="tc-${cid}">${tmr}</td>
         <td style="font-family:var(--mono)">$${parseFloat(t.stake||0).toFixed(2)}</td>
         <td style="font-family:var(--mono)">$${parseFloat(t.payout||0).toFixed(2)}</td>
+        <td>${stratPill}</td>
         <td>${confPill}</td>
         <td id="rc-${cid}" data-state="${t.result||'open'}">${resPill}</td>
         <td id="pc-${cid}" data-state="${t.result||'open'}">${pnlCell}</td>
