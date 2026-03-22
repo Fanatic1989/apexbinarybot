@@ -7,16 +7,15 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
   <style>
     :root {
-      --bg:    #050810; --bg2: #0b0f1c; --bg3: #111827;
-      --bdr:   rgba(255,255,255,0.07); --bdr2: rgba(255,255,255,0.12);
-      --green: #00f5a0; --red: #ff4d6d; --blue: #4d9fff;
-      --amber: #ffb347; --purple: #a78bfa; --muted: #64748b;
-      --text:  #e2e8f0; --mono: 'Space Mono',monospace; --sans: 'DM Sans',sans-serif;
+      --bg:#050810;--bg2:#0b0f1c;--bg3:#111827;
+      --bdr:rgba(255,255,255,0.07);--bdr2:rgba(255,255,255,0.12);
+      --green:#00f5a0;--red:#ff4d6d;--blue:#4d9fff;
+      --amber:#ffb347;--purple:#a78bfa;--muted:#64748b;
+      --text:#e2e8f0;--mono:'Space Mono',monospace;--sans:'DM Sans',sans-serif;
     }
     *{box-sizing:border-box;margin:0;padding:0}
     body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;min-height:100vh}
     body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,245,160,0.012) 2px,rgba(0,245,160,0.012) 4px);pointer-events:none;z-index:0}
-
     nav{position:sticky;top:0;z-index:100;background:rgba(5,8,16,0.96);border-bottom:1px solid var(--bdr);backdrop-filter:blur(12px);padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between}
     .brand{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green);letter-spacing:2px}
     .brand span{color:var(--muted);font-weight:400}
@@ -30,13 +29,10 @@
     .dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
     @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-
     .page{position:relative;z-index:1;padding:18px 24px;max-width:1400px;margin:0 auto}
-
     .session-bar{background:var(--bg2);border:1px solid var(--bdr);border-radius:10px;padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
     .session-bar span{font-family:var(--mono);font-size:11px;color:var(--muted)}
     .session-bar strong{color:var(--text)}
-
     .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px}
     .metric{background:var(--bg2);border:1px solid var(--bdr);border-radius:12px;padding:14px 16px;position:relative;overflow:hidden}
     .metric::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--green),transparent)}
@@ -44,15 +40,13 @@
     .metric.mb::before{background:linear-gradient(90deg,transparent,var(--blue),transparent)}
     .metric.ma::before{background:linear-gradient(90deg,transparent,var(--amber),transparent)}
     .mv{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--green);line-height:1.2}
-    .mv.red{color:var(--red)} .mv.wht{color:var(--text)} .mv.blu{color:var(--blue)} .mv.amb{color:var(--amber)}
+    .mv.red{color:var(--red)}.mv.wht{color:var(--text)}.mv.blu{color:var(--blue)}.mv.amb{color:var(--amber)}
     .ml{font-size:10px;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.08em}
-
     .card{background:var(--bg2);border:1px solid var(--bdr);border-radius:12px;padding:16px 20px;margin-bottom:14px}
     .ctitle{font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px;font-family:var(--mono)}
-
     .btn-row{display:flex;flex-wrap:wrap;gap:8px}
     .btn{padding:8px 18px;border-radius:8px;border:1px solid transparent;cursor:pointer;font-size:12px;font-weight:600;font-family:var(--mono);letter-spacing:.5px;transition:all .15s}
-    .btn:hover{transform:translateY(-1px)} .btn:active{transform:translateY(0)}
+    .btn:hover{transform:translateY(-1px)}.btn:active{transform:translateY(0)}
     .bs{background:var(--green);color:#000;border-color:var(--green)}
     .bx{background:transparent;color:var(--red);border-color:var(--red)}
     .bd{background:transparent;color:var(--blue);border-color:var(--blue)}
@@ -61,26 +55,19 @@
     .risk-btn.active{background:rgba(0,245,160,0.15);color:var(--green);border-color:var(--green);font-weight:700}
     .risk-btn.active.warn{background:rgba(255,179,71,0.15);color:var(--amber);border-color:var(--amber)}
     .risk-btn.active.danger{background:rgba(255,77,109,0.15);color:var(--red);border-color:var(--red)}
-
     .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     @media(max-width:900px){.two-col{grid-template-columns:1fr}}
-
     .tbl-wrap{overflow-x:auto}
     table{width:100%;border-collapse:collapse;font-size:12px}
     thead th{text-align:left;padding:7px 10px;color:var(--muted);font-weight:500;font-family:var(--mono);font-size:10px;border-bottom:1px solid var(--bdr);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
     tbody td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.04);color:#94a3b8;vertical-align:middle}
     tbody tr:hover td{background:rgba(255,255,255,0.02)}
     tbody tr:last-child td{border-bottom:none}
-
     .log-box{background:var(--bg);border:1px solid var(--bdr);border-radius:8px;padding:12px;height:200px;overflow-y:auto;font-family:var(--mono);font-size:11px;line-height:1.8;color:var(--muted)}
-    .log-box .ok{color:var(--green)} .log-box .er{color:var(--red)} .log-box .wa{color:var(--amber)} .log-box .in{color:var(--blue)}
-
+    .log-box .ok{color:var(--green)}.log-box .er{color:var(--red)}.log-box .wa{color:var(--amber)}.log-box .in{color:var(--blue)}
     .mkt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px}
     .mkt-card{background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between}
-
     #toast{position:fixed;bottom:24px;right:24px;z-index:9999;background:var(--green);color:#000;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:700;font-family:var(--mono);display:none}
-
-    /* Progress bar in timer */
     .tpbar{width:50px;height:3px;background:rgba(255,255,255,0.1);border-radius:2px;margin:3px auto 0}
     .tpfill{height:3px;border-radius:2px;transition:width .1s}
   </style>
@@ -99,7 +86,6 @@
 
 <div class="page">
 
-  <!-- Session bar -->
   <div class="session-bar">
     <div style="display:flex;align-items:center;gap:12px">
       <span>SESSION <strong id="sess-name">—</strong></span>
@@ -108,7 +94,6 @@
     <span id="refresh-tick">—</span>
   </div>
 
-  <!-- Metrics -->
   <div class="metrics">
     <div class="metric"><div class="mv wht" id="m-bal">—</div><div class="ml">Balance</div></div>
     <div class="metric"><div class="mv wht" id="m-tot">—</div><div class="ml">Total Trades</div></div>
@@ -116,25 +101,24 @@
     <div class="metric mr"><div class="mv red" id="m-los">—</div><div class="ml">Losses</div></div>
     <div class="metric">
       <div class="mv" id="m-wr">—</div><div class="ml">Win Rate</div>
-      <div style="background:var(--bg3);border-radius:4px;height:4px;margin-top:6px;overflow:hidden"><div id="wr-bar" style="height:4px;border-radius:4px;background:var(--green);width:0%;transition:width .5s"></div></div>
+      <div style="background:var(--bg3);border-radius:4px;height:4px;margin-top:6px;overflow:hidden">
+        <div id="wr-bar" style="height:4px;border-radius:4px;background:var(--green);width:0%;transition:width .5s"></div>
+      </div>
     </div>
     <div class="metric"><div class="mv" id="m-pnl">—</div><div class="ml">Net P&amp;L</div></div>
     <div class="metric mb"><div class="mv blu" id="m-dpnl">—</div><div class="ml">Daily P&amp;L</div></div>
     <div class="metric ma"><div class="mv amb" id="m-con">—</div><div class="ml">Consec. Losses</div></div>
   </div>
 
-  <!-- Controls -->
   <div class="card">
     <div class="ctitle">Bot Control</div>
     <div class="btn-row">
-      <button class="btn bs" onclick="startBot()">▶ START</button>
-      <button class="btn bx" onclick="stopBot()">■ STOP</button>
+      <button class="btn bs" onclick="startBot()">&#9654; START</button>
+      <button class="btn bx" onclick="stopBot()">&#9632; STOP</button>
       <button class="btn bd" onclick="setMode('demo')">DEMO</button>
       <button class="btn bl" onclick="setMode('live')">LIVE</button>
-      <button class="btn br" onclick="loadAll()">↻ REFRESH</button>
+      <button class="btn br" onclick="loadAll()">&#8635; REFRESH</button>
     </div>
-
-    <!-- Risk control -->
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--bdr)">
       <div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px;font-family:var(--mono)">Risk Per Trade</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -150,12 +134,10 @@
           <div id="stake-display" style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--text)">$—</div>
         </div>
       </div>
-      <!-- Risk description -->
       <div id="risk-desc" style="margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:8px;border-left:3px solid var(--green);font-size:12px;color:var(--muted);line-height:1.6"></div>
     </div>
   </div>
 
-  <!-- Trade history -->
   <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
       <span class="ctitle" style="margin-bottom:0">Trade History</span>
@@ -173,7 +155,6 @@
     </div>
   </div>
 
-  <!-- Log + Market scan -->
   <div class="two-col">
     <div class="card">
       <div class="ctitle">Activity Log</div>
@@ -188,26 +169,24 @@
   <!-- News filter panel -->
   <div class="card" id="news-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <span class="ctitle" style="margin-bottom:0">📰 Upcoming News — Auto Blackout</span>
-      <span id="news-status" class="pill pg" style="font-size:10px">● Active</span>
+      <span class="ctitle" style="margin-bottom:0">&#128240; Upcoming News — Auto Blackout</span>
+      <span id="news-status" class="pill pg" style="font-size:10px">&#9679; Active</span>
     </div>
     <div id="news-events" style="display:flex;flex-wrap:wrap;gap:6px">
       <span style="font-size:12px;color:var(--muted)">Loading calendar...</span>
     </div>
   </div>
 
-  <!-- AI Strategy Panel -->
   <div class="card" id="ai-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
-      <span class="ctitle" style="margin-bottom:0">🤖 AI Strategy Performance</span>
-      <span id="ai-active-pill" class="pill pg">● Self-Learning</span>
+      <span class="ctitle" style="margin-bottom:0">&#129302; AI Strategy Performance</span>
+      <span id="ai-active-pill" class="pill pg">&#9679; Self-Learning</span>
     </div>
     <div id="ai-strategy-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
       <div style="color:var(--muted);font-size:12px;padding:8px">Waiting for trade data...</div>
     </div>
   </div>
 
-  <!-- Session performance -->
   <div class="card">
     <div class="ctitle">Session Performance</div>
     <div class="tbl-wrap">
@@ -224,56 +203,41 @@
 <script>
 const FOREX = ["frxEURUSD","frxGBPUSD","frxUSDJPY","frxGBPJPY","frxEURGBP","frxAUDUSD","frxUSDCAD","frxUSDCHF","frxEURJPY"];
 
-// ── API helper ──────────────────────────────
-function api(url, cb) { fetch(url).then(r=>r.json()).then(cb).catch(e=>console.error(url,e)); }
+function api(url, cb){ fetch(url).then(r=>r.json()).then(cb).catch(e=>console.error(url,e)); }
 
-// ── Bot controls ────────────────────────────
 function startBot(){ api('/start', d=>toast(d.status)); }
+function stopBot(){  api('/stop',  d=>toast(d.status)); }
 
-// ── Risk control ────────────────────────────
 let currentRisk = 1;
 
 function setRisk(pct){
   currentRisk = pct;
-  api('/set-risk/'+pct, d=>{
-    toast('Risk set to '+pct+'%');
-    updateRiskDisplay(pct, d.balance||0);
-  });
+  api('/set-risk/'+pct, d=>{ toast('Risk set to '+pct+'%'); updateRiskDisplay(pct, d.balance||0); });
 }
 
 function updateRiskDisplay(pct, balance){
-  // Update buttons
   document.querySelectorAll('.risk-btn').forEach(b=>b.classList.remove('active','warn','danger'));
   const btn = document.getElementById('risk-'+pct);
-  if(btn){
-    btn.classList.add('active');
-    if(pct===2) btn.classList.add('warn');
-    if(pct===3) btn.classList.add('danger');
-  }
+  if(btn){ btn.classList.add('active'); if(pct===2) btn.classList.add('warn'); if(pct===3) btn.classList.add('danger'); }
   document.getElementById('risk-display').textContent = pct+'%';
-  document.getElementById('risk-display').style.color =
-    pct===1?'var(--green)':pct===2?'var(--amber)':'var(--red)';
-
-  // Calculate stake
+  document.getElementById('risk-display').style.color = pct===1?'var(--green)':pct===2?'var(--amber)':'var(--red)';
   const bal   = parseFloat(balance)||0;
-  const stake = bal > 0 ? Math.max((bal*(pct/100)).toFixed(2), 0.35) : '—';
+  const stake = bal>0 ? Math.max((bal*(pct/100)).toFixed(2), 0.35) : '—';
   document.getElementById('stake-display').textContent = bal>0?'$'+stake:'$—';
-
-  // Risk description
   const descs = {
-    1: '🟢 <strong>Conservative (1%)</strong> — Recommended for beginners. Lose 10 in a row and you still have 90% of your balance. Best for long-term growth.',
-    2: '🟡 <strong>Moderate (2%)</strong> — Balanced risk/reward. Good for experienced traders with a proven win rate above 58%.',
-    3: '🔴 <strong>Aggressive (3%)</strong> — High risk. Only use if your win rate is consistently above 62%. Can grow account fast but also lose fast.'
+    1:'🟢 <strong>Conservative (1%)</strong> — Recommended for beginners. Lose 10 in a row and you still have 90% of your balance. Best for long-term growth.',
+    2:'🟡 <strong>Moderate (2%)</strong> — Balanced risk/reward. Good for experienced traders with a proven win rate above 58%.',
+    3:'🔴 <strong>Aggressive (3%)</strong> — High risk. Only use if your win rate is consistently above 62%. Can grow account fast but also lose fast.'
   };
   document.getElementById('risk-desc').innerHTML = descs[pct]||'';
 }
-function stopBot() { api('/stop',  d=>toast(d.status)); }
+
 function setMode(m){
   if(m==='live'&&!confirm('Switch to LIVE?\nReal money will be traded.')) return;
   api('/mode/'+m, d=>{ toast('Mode: '+d.mode); loadStatus(); });
 }
 
-// ── Status ──────────────────────────────────
+// ── Status ──────────────────────────────────────────────────
 function loadStatus(){
   api('/status', d=>{
     const run = d.bot_running;
@@ -285,7 +249,7 @@ function loadStatus(){
     setText('mkt-count', (d.active_markets||0)+' markets');
     const r = d.risk;
     if(r){
-      setText('m-bal', '$'+r.balance);
+      setText('m-bal','$'+r.balance);
       setText('m-tot', r.total_trades);
       setText('m-win', r.wins);
       setText('m-los', r.losses);
@@ -294,27 +258,23 @@ function loadStatus(){
       document.getElementById('wr-bar').style.width = wr+'%';
       document.getElementById('wr-bar').style.background = wr>=60?'var(--green)':wr>=50?'var(--amber)':'var(--red)';
       const pnl = parseFloat(r.net_pnl||0);
-      const pe = document.getElementById('m-pnl');
+      const pe  = document.getElementById('m-pnl');
       pe.textContent = (pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2);
-      pe.className = 'mv'+(pnl<0?' red':'');
+      pe.className   = 'mv'+(pnl<0?' red':'');
       const dp = parseFloat(r.daily_profit||0)-parseFloat(r.daily_loss||0);
-      const de = document.getElementById('m-dpnl');
-      de.textContent = (dp>=0?'+$':'-$')+Math.abs(dp).toFixed(2);
+      document.getElementById('m-dpnl').textContent = (dp>=0?'+$':'-$')+Math.abs(dp).toFixed(2);
       setText('m-con', r.consec_losses||0);
     }
     if(d.last_signals) buildMktGrid(d.last_signals);
-    // Sync risk selector with server setting
-    if(d.risk_pct && d.risk_pct !== currentRisk){
-      currentRisk = d.risk_pct;
-    }
-    if(r && r.balance){
-      updateRiskDisplay(currentRisk, r.balance);
-    }
+    if(d.risk_pct && d.risk_pct !== currentRisk) currentRisk = d.risk_pct;
+    if(r && r.balance) updateRiskDisplay(currentRisk, r.balance);
     if(d.ai_strategy) buildAIPanel(d.ai_strategy);
+    // ── News panel — THIS was the missing call ──
+    buildNewsPanel(d.news_events || []);
   });
 }
 
-// ── Trades ──────────────────────────────────
+// ── Trades ──────────────────────────────────────────────────
 function loadTrades(){
   api('/trades', d=>{
     const trades = (d.trades||[]).slice().reverse().slice(0,100);
@@ -323,84 +283,67 @@ function loadTrades(){
         '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr>';
       return;
     }
-
     const tbody = document.getElementById('trade-tbody');
-    // Map existing rows
     const existing = {};
     tbody.querySelectorAll('tr[data-cid]').forEach(r=>{ existing[r.dataset.cid]=r; });
-
     const sesStats = {};
     let newHtml = '';
-
     trades.forEach(t=>{
-      const cid   = String(t.contract_id||Math.random().toString(36).slice(2));
-      const won   = t.result==='won';
-      const lost  = t.result==='lost';
-      const open  = !won && !lost;
-
-      // If row exists and result changed — update in place
+      const cid  = String(t.contract_id||Math.random().toString(36).slice(2));
+      const won  = t.result==='won';
+      const lost = t.result==='lost';
+      const open = !won&&!lost;
       if(existing[cid]){
         if(!open){
-          const rc = document.getElementById('rc-'+cid);
-          const pc = document.getElementById('pc-'+cid);
-          const tc = document.getElementById('tc-'+cid);
-          if(rc && rc.dataset.state==='open'){
-            rc.dataset.state = t.result;
-            rc.innerHTML = won ? badge('✓ WIN','rgba(0,245,160,0.12)','#00f5a0','rgba(0,245,160,0.3)') : badge('✗ LOSS','rgba(255,77,109,0.12)','#ff4d6d','rgba(255,77,109,0.3)');
+          const rc=document.getElementById('rc-'+cid);
+          const pc=document.getElementById('pc-'+cid);
+          const tc=document.getElementById('tc-'+cid);
+          if(rc&&rc.dataset.state==='open'){
+            rc.dataset.state=t.result;
+            rc.innerHTML=won?badge('✓ WIN','rgba(0,245,160,0.12)','#00f5a0','rgba(0,245,160,0.3)'):badge('✗ LOSS','rgba(255,77,109,0.12)','#ff4d6d','rgba(255,77,109,0.3)');
           }
-          if(pc && pc.dataset.state==='open'){
-            pc.dataset.state = t.result;
-            const pnl = parseFloat(t.profit||0);
-            pc.innerHTML = pnl>0 ? badge('+$'+Math.abs(pnl).toFixed(2),'rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)') : badge('-$'+Math.abs(pnl).toFixed(2),'rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)');
+          if(pc&&pc.dataset.state==='open'){
+            pc.dataset.state=t.result;
+            const pnl=parseFloat(t.profit||0);
+            pc.innerHTML=pnl>0?badge('+$'+Math.abs(pnl).toFixed(2),'rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)'):badge('-$'+Math.abs(pnl).toFixed(2),'rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)');
           }
-          if(tc){ tc.innerHTML = won ? '<span style="font-family:var(--mono);font-size:11px;color:var(--green)">✓ Done</span>' : '<span style="font-family:var(--mono);font-size:11px;color:var(--red)">✗ Done</span>'; }
+          if(tc){ tc.innerHTML=won?'<span style="font-family:var(--mono);font-size:11px;color:var(--green)">✓ Done</span>':'<span style="font-family:var(--mono);font-size:11px;color:var(--red)">✗ Done</span>'; }
         }
-        // Track session stats for existing row
-        const isF = FOREX.includes(t.symbol||t.market);
-        const st  = isF?'Forex':'Synthetic';
+        const isF=FOREX.includes(t.symbol||t.market); const st=isF?'Forex':'Synthetic';
         if(!sesStats[st]) sesStats[st]={trades:0,wins:0,losses:0,pnl:0};
         sesStats[st].trades++;
         if(won){sesStats[st].wins++;sesStats[st].pnl+=parseFloat(t.profit||0);}
         if(lost){sesStats[st].losses++;sesStats[st].pnl-=parseFloat(t.stake||0);}
         return;
       }
-
-      // New row — build HTML
-      const isF = FOREX.includes(t.symbol||t.market);
-      const st  = isF?'Forex':'Synthetic';
+      const isF=FOREX.includes(t.symbol||t.market); const st=isF?'Forex':'Synthetic';
       if(!sesStats[st]) sesStats[st]={trades:0,wins:0,losses:0,pnl:0};
       sesStats[st].trades++;
       if(won){sesStats[st].wins++;sesStats[st].pnl+=parseFloat(t.profit||0);}
       if(lost){sesStats[st].losses++;sesStats[st].pnl-=parseFloat(t.stake||0);}
-
-      const typePill = isF ? badge('FOREX','rgba(167,139,250,0.1)','#a78bfa','rgba(167,139,250,0.25)') : badge('SYNTH','rgba(100,116,139,0.1)','#94a3b8','rgba(100,116,139,0.2)');
-      const dirPill  = t.direction==='CALL' ? badge('▲ CALL','rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)') : badge('▼ PUT','rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)');
-      const confPill = t.confidence==='high' ? badge('🔥 HIGH','rgba(255,179,71,0.12)','#ffb347','rgba(255,179,71,0.3)') : badge('NORMAL','rgba(77,159,255,0.1)','#4d9fff','rgba(77,159,255,0.25)');
-
-      const resPill = won ? badge('✓ WIN','rgba(0,245,160,0.12)','#00f5a0','rgba(0,245,160,0.3)') :
-                     lost ? badge('✗ LOSS','rgba(255,77,109,0.12)','#ff4d6d','rgba(255,77,109,0.3)') :
-                     `<span id="rc-${cid}" data-state="open" style="display:inline-block;background:rgba(100,116,139,0.1);color:#64748b;border:1px solid rgba(100,116,139,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px">— OPEN</span>`;
-
-      const pnl     = parseFloat(t.profit||0);
-      const pot     = parseFloat(t.payout||0)-parseFloat(t.stake||0);
-      const pnlCell = open && pot>0
-        ? `<span id="pc-${cid}" data-state="open" style="display:inline-block;background:rgba(255,179,71,0.08);color:#ffb347;border:1px solid rgba(255,179,71,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${pot.toFixed(2)}?</span>`
-        : pnl>0 ? badge('+$'+Math.abs(pnl).toFixed(2),'rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)')
-        : pnl<0 ? badge('-$'+Math.abs(pnl).toFixed(2),'rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)')
-        : '<span style="color:#64748b;font-family:var(--mono);font-size:11px">—</span>';
-
-      // Timer
-      const tt = t.time ? new Date(t.time.replace(' UTC','Z')) : null;
-      const em = parseFloat(t.expiry||0);
-      const sa = tt ? new Date(tt.getTime()+em*60000) : null;
-      const lm = sa ? sa-Date.now() : -1;
+      const typePill=isF?badge('FOREX','rgba(167,139,250,0.1)','#a78bfa','rgba(167,139,250,0.25)'):badge('SYNTH','rgba(100,116,139,0.1)','#94a3b8','rgba(100,116,139,0.2)');
+      const dirPill=t.direction==='CALL'?badge('▲ CALL','rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)'):badge('▼ PUT','rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)');
+      const confPill=t.confidence==='high'?badge('🔥 HIGH','rgba(255,179,71,0.12)','#ffb347','rgba(255,179,71,0.3)'):badge('NORMAL','rgba(77,159,255,0.1)','#4d9fff','rgba(77,159,255,0.25)');
+      const resPill=won?badge('✓ WIN','rgba(0,245,160,0.12)','#00f5a0','rgba(0,245,160,0.3)'):
+                   lost?badge('✗ LOSS','rgba(255,77,109,0.12)','#ff4d6d','rgba(255,77,109,0.3)'):
+                   `<span id="rc-${cid}" data-state="open" style="display:inline-block;background:rgba(100,116,139,0.1);color:#64748b;border:1px solid rgba(100,116,139,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px">— OPEN</span>`;
+      const pnl=parseFloat(t.profit||0);
+      const pot=parseFloat(t.payout||0)-parseFloat(t.stake||0);
+      const pnlCell=open&&pot>0
+        ?`<span id="pc-${cid}" data-state="open" style="display:inline-block;background:rgba(255,179,71,0.08);color:#ffb347;border:1px solid rgba(255,179,71,0.2);padding:3px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700">+$${pot.toFixed(2)}?</span>`
+        :pnl>0?badge('+$'+Math.abs(pnl).toFixed(2),'rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)')
+        :pnl<0?badge('-$'+Math.abs(pnl).toFixed(2),'rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)')
+        :'<span style="color:#64748b;font-family:var(--mono);font-size:11px">—</span>';
+      const tt=t.time?new Date(t.time.replace(' UTC','Z')):null;
+      const em=parseFloat(t.expiry||0);
+      const sa=tt?new Date(tt.getTime()+em*60000):null;
+      const lm=sa?sa-Date.now():-1;
       let tmr;
-      if(!sa) tmr = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">—</span>';
-      else if(!open) tmr = won ? '<span style="font-family:var(--mono);font-size:11px;color:var(--green)">✓ Done</span>' : '<span style="font-family:var(--mono);font-size:11px;color:var(--red)">✗ Done</span>';
-      else if(lm<=0) tmr = '<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
-      else tmr = `<span id="tmr-${cid}" data-settle="${sa.getTime()}" data-dur="${em}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--green)">—</span>`;
-
-      newHtml += `<tr data-cid="${cid}">
+      if(!sa) tmr='<span style="color:var(--muted);font-family:var(--mono);font-size:11px">—</span>';
+      else if(!open) tmr=won?'<span style="font-family:var(--mono);font-size:11px;color:var(--green)">✓ Done</span>':'<span style="font-family:var(--mono);font-size:11px;color:var(--red)">✗ Done</span>';
+      else if(lm<=0) tmr='<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
+      else tmr=`<span id="tmr-${cid}" data-settle="${sa.getTime()}" data-dur="${em}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--green)">—</span>`;
+      newHtml+=`<tr data-cid="${cid}">
         <td style="font-family:var(--mono);font-size:10px;white-space:nowrap">${t.time||'—'}</td>
         <td><code style="color:var(--blue);font-size:11px">${t.symbol||t.market||'—'}</code></td>
         <td>${typePill}</td><td>${dirPill}</td>
@@ -413,29 +356,24 @@ function loadTrades(){
         <td id="pc-${cid}" data-state="${t.result||'open'}">${pnlCell}</td>
       </tr>`;
     });
-
     if(newHtml){
-      const nd = tbody.querySelector('td[colspan]');
-      if(nd) tbody.innerHTML = newHtml;
-      else tbody.insertAdjacentHTML('afterbegin', newHtml);
+      const nd=tbody.querySelector('td[colspan]');
+      if(nd) tbody.innerHTML=newHtml;
+      else tbody.insertAdjacentHTML('afterbegin',newHtml);
     }
-
-    // Summary pills
-    const tot  = trades.length;
-    const wins = trades.filter(t=>t.result==='won').length;
-    const los  = trades.filter(t=>t.result==='lost').length;
-    const opn  = trades.filter(t=>t.result==='open'||t.result==='unresolved').length;
-    const set  = wins+los;
-    const wr   = set ? ((wins/set)*100).toFixed(1) : '0';
-    const wrc  = parseFloat(wr)>=65?'var(--green)':parseFloat(wr)>=50?'var(--amber)':'var(--red)';
-    document.getElementById('tsum').innerHTML =
+    const tot=trades.length;
+    const wins=trades.filter(t=>t.result==='won').length;
+    const los=trades.filter(t=>t.result==='lost').length;
+    const opn=trades.filter(t=>t.result==='open'||t.result==='unresolved').length;
+    const set=wins+los;
+    const wr=set?((wins/set)*100).toFixed(1):'0';
+    const wrc=parseFloat(wr)>=65?'var(--green)':parseFloat(wr)>=50?'var(--amber)':'var(--red)';
+    document.getElementById('tsum').innerHTML=
       spill(tot+' TRADES','rgba(255,255,255,0.05)','#94a3b8','rgba(255,255,255,0.1)')+
       spill(wins+' WIN','rgba(0,245,160,0.1)','#00f5a0','rgba(0,245,160,0.25)')+
       spill(los+' LOSS','rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)')+
       (opn>0?spill(opn+' OPEN','rgba(255,179,71,0.1)','#ffb347','rgba(255,179,71,0.25)'):'')+
       spill(wr+'% WIN RATE','rgba(255,179,71,0.08)',wrc,'rgba(255,179,71,0.15)');
-
-    // Session stats
     if(Object.keys(sesStats).length){
       let sh='';
       Object.entries(sesStats).forEach(([n,s])=>{
@@ -445,27 +383,27 @@ function loadTrades(){
         const cc=parseFloat(pc)>=0?'var(--green)':'var(--red)';
         sh+=`<tr><td style="font-family:var(--mono);color:var(--text)">${n}</td><td style="font-family:var(--mono)">${s.trades}</td><td style="color:var(--green)">${s.wins}</td><td style="color:var(--red)">${s.losses}</td><td style="font-family:var(--mono);color:${wc}">${w}%</td><td style="font-family:var(--mono);color:${cc}">${parseFloat(pc)>=0?'+$':'-$'}${Math.abs(pc).toFixed(2)}</td></tr>`;
       });
-      document.getElementById('sess-tbody').innerHTML = sh;
+      document.getElementById('sess-tbody').innerHTML=sh;
     }
   });
 }
 
-// ── Log ─────────────────────────────────────
+// ── Log ──────────────────────────────────────────────────────
 function loadLog(){
   api('/log', d=>{
-    const box = document.getElementById('log-box');
+    const box=document.getElementById('log-box');
     let h='';
     (d.lines||[]).forEach(l=>{
-      const cls = l.includes('ERROR')?'er':l.includes('WARN')?'wa':l.includes('WIN')||l.includes('✅')?'ok':'in';
-      const s = l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const cls=l.includes('ERROR')?'er':l.includes('WARN')?'wa':l.includes('WIN')||l.includes('✅')?'ok':'in';
+      const s=l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       h+=`<div class="${cls}">${s}</div>`;
     });
-    box.innerHTML = h||'<span style="color:var(--muted)">No activity yet</span>';
-    box.scrollTop = box.scrollHeight;
+    box.innerHTML=h||'<span style="color:var(--muted)">No activity yet</span>';
+    box.scrollTop=box.scrollHeight;
   });
 }
 
-// ── Market grid ──────────────────────────────
+// ── Market grid ──────────────────────────────────────────────
 function buildMktGrid(sigs){
   if(!sigs||!sigs.length) return;
   let h='';
@@ -481,61 +419,113 @@ function buildMktGrid(sigs){
       <span style="font-family:var(--mono);font-size:10px;font-weight:700;color:${dc}">${dl}</span>
     </div>`;
   });
-  document.getElementById('mkt-grid').innerHTML = h;
+  document.getElementById('mkt-grid').innerHTML=h;
 }
 
-// ── Timers ───────────────────────────────────
+// ── News panel ───────────────────────────────────────────────
+function buildNewsPanel(events){
+  const box=document.getElementById('news-events');
+  if(!box) return;
+  if(!events||events.length===0){
+    const now=new Date();
+    const utcH=now.getUTCHours();
+    const utcD=now.getUTCDay();
+    const dangerous=(utcH>=12&&utcH<=14)||(utcH>=7&&utcH<=8)||(utcD===5&&utcH>=12&&utcH<=14);
+    box.innerHTML=dangerous
+      ?'<span style="font-size:12px;color:#ffb347">⚠️ Potential high-impact window active — bot filtering signals</span>'
+      :'<span style="font-size:12px;color:var(--green)">✅ No upcoming high-impact news — safe to trade</span>';
+    return;
+  }
+  let h='';
+  events.forEach(e=>{
+    const imp=(e.impact||'').toLowerCase();
+    const col=imp==='high'?'#ff4d6d':'#ffb347';
+    const bg =imp==='high'?'rgba(255,77,109,0.08)':'rgba(255,179,71,0.08)';
+    const bdr=imp==='high'?'rgba(255,77,109,0.25)':'rgba(255,179,71,0.25)';
+    const icon=imp==='high'?'🔴':'🟠';
+    const timeLabel=e.date_utc?`${e.date_utc} ${e.time_utc}`:(e.time_utc||'');
+    const minsLabel=e.mins_away>90?`${Math.round(e.mins_away/60)}h away`:`${e.mins_away}m away`;
+    h+=`<div style="background:${bg};border:1px solid ${bdr};border-radius:8px;padding:8px 12px;min-width:160px;max-width:220px">
+      <div style="font-size:10px;font-family:var(--mono);font-weight:700;color:${col}">${icon} ${e.currency||'—'} ${imp.toUpperCase()}</div>
+      <div style="font-size:11px;color:var(--text);margin-top:3px;line-height:1.4">${e.title||'—'}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono)">${timeLabel} · ${minsLabel}</div>
+    </div>`;
+  });
+  box.innerHTML=h;
+}
+
+// ── AI panel ─────────────────────────────────────────────────
+function buildAIPanel(ai){
+  if(!ai||!ai.win_rates) return;
+  const NAMES={rsi_reversal:'RSI Reversal',bb_bounce:'BB Bounce',ema_triple:'EMA Triple',false_breakout:'False Breakout',momentum_streak:'Momentum'};
+  const rates=ai.win_rates;
+  let best=null,bestWR=-1,html='';
+  Object.entries(rates).forEach(([s,v])=>{
+    if(!v.total){ html+=`<div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;opacity:.5"><div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${NAMES[s]||s}</div><div style="font-size:11px;color:var(--muted);margin-top:4px">No data yet</div></div>`; return; }
+    const wr=parseFloat(v.win_rate||0);
+    const col=wr>=65?'var(--green)':wr>=55?'var(--amber)':'var(--red)';
+    const bar=Math.min(100,wr);
+    if(wr>bestWR&&wr>=55&&v.total>=3){bestWR=wr;best=s;}
+    html+=`<div style="background:var(--bg3);border:1px solid ${wr>=60?col:'var(--bdr)'};border-radius:8px;padding:10px 12px;position:relative;overflow:hidden">
+      <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">${NAMES[s]||s}</div>
+      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${col};margin:4px 0">${v.win_rate||'—'}%</div>
+      <div style="font-size:10px;color:var(--muted)">${v.wins}W ${v.losses}L · ${v.total} trades</div>
+      <div style="background:rgba(255,255,255,0.05);border-radius:2px;height:3px;margin-top:8px">
+        <div style="width:${bar}%;height:3px;border-radius:2px;background:${col};transition:width .5s"></div>
+      </div>
+      ${best===s?'<div style="position:absolute;top:6px;right:8px;font-size:9px;font-family:var(--mono);color:var(--green);font-weight:700">★ BEST</div>':''}
+    </div>`;
+  });
+  document.getElementById('ai-strategy-grid').innerHTML=html;
+  if(best){ document.getElementById('ai-active-pill').textContent='★ '+(NAMES[best]||best); document.getElementById('ai-active-pill').className='pill pg'; }
+}
+
+// ── Timers ───────────────────────────────────────────────────
 function tickTimers(){
-  const now = Date.now();
+  const now=Date.now();
   document.querySelectorAll('[data-settle]').forEach(el=>{
-    const settle = parseInt(el.dataset.settle);
-    const dur    = parseFloat(el.dataset.dur||1)*60000;
-    const left   = settle - now;
+    const settle=parseInt(el.dataset.settle);
+    const dur=parseFloat(el.dataset.dur||1)*60000;
+    const left=settle-now;
     if(left<=0){
       el.removeAttribute('data-settle');
       el.style.animation='blink 1s infinite';
       el.style.color='var(--amber)';
       el.textContent='Settling...';
-      // Update result cell
-      const cid = el.id.replace('tmr-','');
-      const rc  = document.getElementById('rc-'+cid);
+      const cid=el.id.replace('tmr-','');
+      const rc=document.getElementById('rc-'+cid);
       if(rc&&rc.dataset.state==='open') rc.innerHTML='<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">⏳ Wait</span>';
       return;
     }
-    const mins  = Math.floor(left/60000);
-    const secs  = Math.floor((left%60000)/1000);
-    const tenth = Math.floor((left%1000)/100);
-    const ts    = mins>0 ? `${mins}m ${secs.toString().padStart(2,'0')}s` : `${secs}.${tenth}s`;
-    const pct   = Math.max(0,Math.min(100,(left/dur)*100));
-    const col   = left>60000?'var(--green)':left>30000?'var(--amber)':left>10000?'#ff9100':'var(--red)';
-    el.style.color = col;
-    el.innerHTML = `<div style="text-align:center">
-      <div style="font-size:12px;font-weight:700">${ts}</div>
-      <div class="tpbar"><div class="tpfill" style="width:${pct}%;background:${col}"></div></div>
-    </div>`;
+    const mins=Math.floor(left/60000);
+    const secs=Math.floor((left%60000)/1000);
+    const tenth=Math.floor((left%1000)/100);
+    const ts=mins>0?`${mins}m ${secs.toString().padStart(2,'0')}s`:`${secs}.${tenth}s`;
+    const pct=Math.max(0,Math.min(100,(left/dur)*100));
+    const col=left>60000?'var(--green)':left>30000?'var(--amber)':left>10000?'#ff9100':'var(--red)';
+    el.style.color=col;
+    el.innerHTML=`<div style="text-align:center"><div style="font-size:12px;font-weight:700">${ts}</div><div class="tpbar"><div class="tpfill" style="width:${pct}%;background:${col}"></div></div></div>`;
   });
 }
 setInterval(tickTimers,100);
 
-// Force reload trades if any row has been "Settling..." for over 2 minutes
 setInterval(function(){
   document.querySelectorAll('#trade-tbody tr').forEach(row=>{
-    const tc = row.querySelector('td:nth-child(6)');
-    if(tc && tc.textContent.includes('Settling')){
-      const timeCell = row.querySelector('td:first-child');
+    const tc=row.querySelector('td:nth-child(6)');
+    if(tc&&tc.textContent.includes('Settling')){
+      const timeCell=row.querySelector('td:first-child');
       if(timeCell){
-        const t = new Date(timeCell.textContent.replace(' UTC','Z'));
-        const expTd = row.querySelector('td:nth-child(5)');
-        const expM  = parseFloat(expTd ? expTd.textContent : 1);
-        const settleAt = new Date(t.getTime() + expM*60000);
-        const stuck = Date.now() - settleAt > 120000; // 2 min after expected settle
-        if(stuck){ loadTrades(); }
+        const t=new Date(timeCell.textContent.replace(' UTC','Z'));
+        const expTd=row.querySelector('td:nth-child(5)');
+        const expM=parseFloat(expTd?expTd.textContent:1);
+        const settleAt=new Date(t.getTime()+expM*60000);
+        if(Date.now()-settleAt>120000){ loadTrades(); }
       }
     }
   });
-}, 15000);
+},15000);
 
-// ── Helpers ──────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────
 function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
 function setPill(id,txt,cls){
   const e=document.getElementById(id);if(!e)return;
@@ -558,77 +548,17 @@ function toast(msg){
   t.textContent=msg;t.style.display='block';
   setTimeout(()=>t.style.display='none',2500);
 }
-function buildNewsPanel(events){
-  const box = document.getElementById('news-events');
-  if(!box) return;
-  if(!events || events.length === 0){
-    const now = new Date();
-    const utcH = now.getUTCHours();
-    const utcD = now.getUTCDay(); // 0=Sun,5=Fri
-    // Check if we're near a known dangerous window
-    const dangerous = (utcH>=12&&utcH<=14) || (utcH>=7&&utcH<=8) || (utcD===5&&utcH>=12&&utcH<=14);
-    if(dangerous){
-      box.innerHTML = '<span style="font-size:12px;color:#ffb347">⚠️ Potential high-impact window active — bot filtering signals</span>';
-    } else {
-      box.innerHTML = '<span style="font-size:12px;color:var(--green)">✅ No high-impact news — safe to trade</span>';
-    }
-    return;
-  }
-  let h = '';
-  events.forEach(e=>{
-    const col = e.impact==='high'?'#ff4d6d':'#ffb347';
-    const bg  = e.impact==='high'?'rgba(255,77,109,0.08)':'rgba(255,179,71,0.08)';
-    const bdr = e.impact==='high'?'rgba(255,77,109,0.25)':'rgba(255,179,71,0.25)';
-    const icon= e.impact==='high'?'🔴':'🟠';
-    h += `<div style="background:${bg};border:1px solid ${bdr};border-radius:8px;padding:8px 12px;min-width:160px">
-      <div style="font-size:10px;font-family:var(--mono);font-weight:700;color:${col}">${icon} ${e.currency} ${e.impact.toUpperCase()}</div>
-      <div style="font-size:11px;color:var(--text);margin-top:3px">${e.title}</div>
-      <div style="font-size:10px;color:var(--muted);margin-top:3px;font-family:var(--mono)">${e.time_utc} · ${e.mins_away}m away</div>
-    </div>`;
-  });
-  box.innerHTML = h;
-}
 
-function buildAIPanel(ai){
-  if(!ai||!ai.win_rates) return;
-  const NAMES = {
-    rsi_reversal:'RSI Reversal', bb_bounce:'BB Bounce',
-    ema_triple:'EMA Triple', false_breakout:'False Breakout',
-    momentum_streak:'Momentum'
-  };
-  const rates = ai.win_rates;
-  let best = null, bestWR = -1;
-  let html = '';
-  Object.entries(rates).forEach(([s,v])=>{
-    if(!v.total){ html += `<div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;opacity:.5"><div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${NAMES[s]||s}</div><div style="font-size:11px;color:var(--muted);margin-top:4px">No data yet</div></div>`; return; }
-    const wr = parseFloat(v.win_rate||0);
-    const col = wr>=65?'var(--green)':wr>=55?'var(--amber)':'var(--red)';
-    const bar = Math.min(100,wr);
-    // Only mark as BEST if win rate is above 55% AND has 3+ trades
-    if(wr>bestWR && wr>=55 && v.total>=3){bestWR=wr;best=s;}
-    html += `<div style="background:var(--bg3);border:1px solid ${wr>=60?col:'var(--bdr)'};border-radius:8px;padding:10px 12px;position:relative;overflow:hidden">
-      <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">${NAMES[s]||s}</div>
-      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${col};margin:4px 0">${v.win_rate||'—'}%</div>
-      <div style="font-size:10px;color:var(--muted)">${v.wins}W ${v.losses}L · ${v.total} trades</div>
-      <div style="background:rgba(255,255,255,0.05);border-radius:2px;height:3px;margin-top:8px">
-        <div style="width:${bar}%;height:3px;border-radius:2px;background:${col};transition:width .5s"></div>
-      </div>
-      ${best===s?'<div style="position:absolute;top:6px;right:8px;font-size:9px;font-family:var(--mono);color:var(--green);font-weight:700">★ BEST</div>':''}
-    </div>`;
-  });
-  document.getElementById('ai-strategy-grid').innerHTML = html;
-  if(best){
-    document.getElementById('ai-active-pill').textContent = '★ '+NAMES[best];
-    document.getElementById('ai-active-pill').className = 'pill pg';
-  }
+function loadAll(){
+  loadStatus();
+  loadTrades();
+  loadLog();
+  document.getElementById('refresh-tick').textContent='Last refresh: '+new Date().toLocaleTimeString();
 }
-
-function loadAll(){ loadStatus(); loadTrades(); loadLog(); document.getElementById('refresh-tick').textContent='Last refresh: '+new Date().toLocaleTimeString(); }
 
 loadAll();
 setInterval(loadAll,5000);
-// Init risk display
-setTimeout(()=>updateRiskDisplay(1, 0), 500);
+setTimeout(()=>updateRiskDisplay(1,0),500);
 </script>
 </body>
 </html>
