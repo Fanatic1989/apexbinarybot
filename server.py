@@ -46,7 +46,7 @@ TRADE_HISTORY_FILE = "trade_history.json"
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("logged_in"):
+        if not session.get("logged_in") or session.get("user_logged_in"):
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
@@ -88,8 +88,9 @@ def logout():
 # ─────────────────────────────────────────
 @app.route("/")
 def admin_dashboard():
-    # Admin goes to admin dashboard, everyone else gets the SPA
-    if session.get("logged_in"):
+    # Admin session (logged_in=True) → bot dashboard
+    # User session (user_logged_in=True) or no session → index.html SPA
+    if session.get("logged_in") and not session.get("user_logged_in"):
         return render_template("dashboard.html")
     return render_template("index.html")
 
