@@ -9,6 +9,9 @@ from flask import Flask, jsonify, request, render_template, redirect, url_for, s
 
 import config
 import bot
+from user_routes import user_bp, register_webhook
+import user_manager as um
+import bot_manager as bm
 
 # ─────────────────────────────────────────
 # Logging
@@ -25,6 +28,8 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", config.ADMIN_PASSWORD or "apex-secret-key-change-me")
+app.register_blueprint(user_bp)
+register_webhook(app)
 
 # ─────────────────────────────────────────
 # Bot thread state
@@ -82,9 +87,11 @@ def logout():
 # Route: Dashboard
 # ─────────────────────────────────────────
 @app.route("/")
-@login_required
-def dashboard():
-    return render_template("dashboard.html")
+def root():
+    # Admin goes to admin dashboard, everyone else gets the SPA
+    if session.get("logged_in"):
+        return render_template("dashboard.html")
+    return render_template("index.html")
 
 
 # ─────────────────────────────────────────
@@ -443,6 +450,38 @@ def test_durations():
     working = {k:v for k,v in results.items() if v.startswith("✓")}
     return jsonify({"symbol": symbol, "working": working, "all": results})
 
+
+
+# ─────────────────────────────────────────
+# Route: Admin panel
+# ─────────────────────────────────────────
+@app.route("/admin")
+@login_required
+def admin_panel():
+    return render_template("admin_panel.html")
+
+@app.route("/admin/users")
+@login_required
+def admin_users():
+    return jsonify({"users": um.get_all_users()})
+
+@app.route("/admin/extend-subscription", methods=["POST"])
+@login_required
+def admin_extend():
+    data     = request.get_json() or {}
+    username = data.get("username", "")
+    days     = int(data.get("days", 30))
+    result   = um.admin_extend_subscription(username, days)
+    return jsonify(result)
+
+@app.route("/admin/suspend-user", methods=["POST"])
+@login_required
+def admin_suspend():
+    data     = request.get_json() or {}
+    username = data.get("username", "")
+    suspend  = bool(data.get("suspend", True))
+    result   = um.admin_suspend_user(username, suspend)
+    return jsonify(result)
 
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
