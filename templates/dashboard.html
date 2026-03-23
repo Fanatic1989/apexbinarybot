@@ -29,6 +29,7 @@
     .tab-btn.active{background:var(--bg2);color:var(--text);box-shadow:0 1px 4px rgba(0,0,0,.5)}
     .tab-btn.active.bot{color:var(--green)}
     .tab-btn.active.users{color:var(--blue)}
+    .tab-btn.active.payments{color:var(--amber)}
 
     /* ── PANELS ── */
     .panel{display:none;position:relative;z-index:1;padding:16px 24px 40px;max-width:1400px;margin:0 auto}
@@ -101,6 +102,9 @@
   </button>
   <button class="tab-btn users" id="tab-users" onclick="switchTab('users')">
     👥 User Management
+  </button>
+  <button class="tab-btn payments" id="tab-payments" onclick="switchTab('payments')">
+    💰 Payments
   </button>
 </div>
 
@@ -253,6 +257,38 @@
 
 </div>
 
+
+<!-- ═══════════════════════════════════
+     PANEL 3 — PAYMENTS
+════════════════════════════════════ -->
+<div id="panel-payments" class="panel">
+
+  <div class="metrics" style="margin-top:16px">
+    <div class="metric"><div class="mv" id="p-total">—</div><div class="ml">Total Payments</div></div>
+    <div class="metric ma"><div class="mv amb" id="p-revenue">—</div><div class="ml">Total Revenue</div></div>
+    <div class="metric mb"><div class="mv blu" id="p-mrr">—</div><div class="ml">This Month</div></div>
+    <div class="metric"><div class="mv" id="p-users">—</div><div class="ml">Paying Users</div></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <span class="ctitle" style="margin-bottom:0">Payment History</span>
+      <button class="btn br" onclick="loadPayments()">&#8635; Refresh</button>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Date</th><th>Username</th><th>Amount</th><th>Currency</th><th>Order ID</th><th>Status</th>
+        </tr></thead>
+        <tbody id="pay-tbody">
+          <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -266,6 +302,7 @@ function switchTab(tab) {
   document.getElementById('tab-'+tab).classList.add('active');
   document.getElementById('panel-'+tab).classList.add('active');
   if(tab==='users') loadUsers();
+  if(tab==='payments') loadPayments();
 }
 
 // ── API helper ───────────────────────────────────────────────
@@ -429,6 +466,43 @@ function extendUser(username,days){
 }
 function suspendUser(username,suspend){
   fetch('/admin/suspend-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,suspend})}).then(r=>r.json()).then(d=>{if(d.ok){toast(username+' '+(suspend?'suspended':'unsuspended'));loadUsers();}else toast(d.error||'Failed');});
+}
+
+// ── Payments ─────────────────────────────────────────────────
+function loadPayments(){
+  api('/admin/payments',d=>{
+    const payments=(d.payments||[]).slice().reverse();
+    const summary=d.summary||{};
+    setText('p-total', summary.total_payments||0);
+    setText('p-revenue', '$'+(summary.total_revenue||0).toFixed(2));
+    setText('p-users', Object.keys(summary.by_user||{}).length);
+    // This month
+    const now=new Date();
+    const thisMonth=payments.filter(p=>{
+      const d=new Date(p.timestamp||'');
+      return d.getMonth()===now.getMonth()&&d.getUTCFullYear()===now.getUTCFullYear();
+    });
+    const monthRev=thisMonth.reduce((s,p)=>s+parseFloat(p.amount_usd||0),0);
+    setText('p-mrr','$'+monthRev.toFixed(2));
+    if(!payments.length){
+      document.getElementById('pay-tbody').innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">No payments yet</td></tr>';
+      return;
+    }
+    let h='';
+    payments.forEach(p=>{
+      const ts=p.timestamp?new Date(p.timestamp).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
+      const statusCol=p.status==='confirmed'||p.status==='finished'?'var(--green)':p.status==='pending'?'var(--amber)':'var(--red)';
+      h+=`<tr>
+        <td style="font-family:var(--mono);font-size:11px">${ts}</td>
+        <td style="font-family:var(--mono);font-weight:700;color:var(--text)">${p.username||'—'}</td>
+        <td style="font-family:var(--mono);color:var(--green)">$${parseFloat(p.amount_usd||0).toFixed(2)}</td>
+        <td style="font-family:var(--mono);color:var(--muted)">${(p.currency||'').toUpperCase()}</td>
+        <td style="font-family:var(--mono);font-size:10px;color:var(--muted)">${p.order_id||'—'}</td>
+        <td><span style="font-family:var(--mono);font-size:11px;font-weight:700;color:${statusCol}">${(p.status||'').toUpperCase()}</span></td>
+      </tr>`;
+    });
+    document.getElementById('pay-tbody').innerHTML=h;
+  });
 }
 
 // ── Market grid & news ────────────────────────────────────────
