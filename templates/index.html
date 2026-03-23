@@ -355,6 +355,28 @@
     </div>
   </div>
 
+
+  <!-- Change Password -->
+  <div class="card">
+    <div class="ctitle">🔐 Change Password</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-family:var(--mono)">CURRENT PASSWORD</div>
+        <input id="pw-current" class="input" type="password" placeholder="Current password"/>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-family:var(--mono)">NEW PASSWORD</div>
+        <input id="pw-new" class="input" type="password" placeholder="New password (min 6)"/>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-family:var(--mono)">CONFIRM NEW</div>
+        <input id="pw-confirm" class="input" type="password" placeholder="Repeat new password"/>
+      </div>
+    </div>
+    <button class="btn btn-outline" onclick="changePassword()" style="border-color:rgba(0,245,160,0.3);color:var(--green)">🔐 Update Password</button>
+    <div id="pw-msg" style="font-size:11px;margin-top:8px;display:none"></div>
+  </div>
+
   <!-- News -->
   <div class="card">
     <div class="ctitle">📰 Upcoming News — Auto Blackout</div>
@@ -548,6 +570,30 @@ function setMode(m){
 function setRisk(pct){
   apiGet('/user/set-risk/'+pct,d=>{toast('Risk: '+pct+'%');loadStatus();});
 }
+function changePassword(){
+  const cur  = document.getElementById('pw-current').value.trim();
+  const nw   = document.getElementById('pw-new').value.trim();
+  const conf = document.getElementById('pw-confirm').value.trim();
+  const msg  = document.getElementById('pw-msg');
+  if(!cur||!nw||!conf){ showPwMsg('Enter all fields','var(--red)'); return; }
+  if(nw !== conf){ showPwMsg('New passwords do not match','var(--red)'); return; }
+  if(nw.length < 6){ showPwMsg('Password must be at least 6 characters','var(--red)'); return; }
+  apiPost('/user/change-password',{current:cur, new_password:nw}, d=>{
+    if(d.ok){
+      showPwMsg('✓ Password updated successfully','var(--green)');
+      document.getElementById('pw-current').value='';
+      document.getElementById('pw-new').value='';
+      document.getElementById('pw-confirm').value='';
+    } else {
+      showPwMsg('✗ '+(d.error||'Failed'),'var(--red)');
+    }
+  });
+}
+function showPwMsg(msg,col){
+  const el=document.getElementById('pw-msg');
+  el.style.display='block';el.style.color=col;el.textContent=msg;
+}
+
 function saveTokens(){
   const demo=document.getElementById('demo-token').value.trim();
   const live=document.getElementById('live-token').value.trim();
