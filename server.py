@@ -66,7 +66,7 @@ def login():
             session["logged_in"] = True
             session["username"]  = username
             log.info(f"[SERVER] Login successful for '{username}'")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("admin_dashboard"))
         else:
             error = "Invalid username or password"
             log.warning(f"[SERVER] Failed login attempt for '{username}'")
@@ -87,7 +87,7 @@ def logout():
 # Route: Dashboard
 # ─────────────────────────────────────────
 @app.route("/")
-def root():
+def admin_dashboard():
     # Admin goes to admin dashboard, everyone else gets the SPA
     if session.get("logged_in"):
         return render_template("dashboard.html")
