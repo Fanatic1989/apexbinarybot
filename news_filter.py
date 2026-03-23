@@ -79,9 +79,10 @@ def fetch_forex_factory() -> List[Dict]:
                     continue
 
                 try:
+                    # Convert to UTC — FF timestamps often have EDT offset (-04:00)
                     event_dt = datetime.fromisoformat(
                         date_str.replace("Z", "+00:00")
-                    )
+                    ).astimezone(timezone.utc)
                 except ValueError:
                     log.debug(f"[FF] Bad date: {date_str}")
                     continue
@@ -189,6 +190,10 @@ class NewsFilter:
             if not event_dt:
                 return None
 
+            # Ensure UTC — FF timestamps may have EDT offset
+            if event_dt.tzinfo is not None and event_dt.utcoffset().total_seconds() != 0:
+                event_dt = event_dt.astimezone(timezone.utc)
+
             # Synthetics: 5 min pre-buffer, 15 min post-buffer
             # Forex: 30 min pre+post for HIGH, 15 min for MEDIUM
             if is_synth:
@@ -230,9 +235,9 @@ class NewsFilter:
             if not self._enabled:
                 return False, ""
 
-            now     = datetime.now(timezone.utc)
+            now     = datetime.now(timezone.utc)  # always UTC
             weekday = now.weekday()
-            now_min = now.hour * 60 + now.minute
+            now_min = now.hour * 60 + now.minute     # UTC minutes
 
             is_synth = not market.startswith("frx")
             is_wknd  = weekday >= 5
