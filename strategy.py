@@ -151,8 +151,12 @@ def _synthetic_strategy(df, candles, market, regime):
     mid_trend   = 1 if e21 > e50 else -1
 
     if regime == "trending":
-        put_allowed  = short_trend == -1
-        call_allowed = short_trend == 1
+        # Outside band = mean reversion = allow against short trend
+        # Inside band = momentum = must follow trend
+        at_upper_extreme = bb_pct >= 0.88
+        at_lower_extreme = bb_pct <= 0.12
+        put_allowed  = short_trend == -1 or at_upper_extreme
+        call_allowed = short_trend == 1  or at_lower_extreme
     else:
         put_allowed  = True
         call_allowed = True
