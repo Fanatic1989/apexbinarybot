@@ -33,19 +33,19 @@ HTF_COUNT          = 50
 # Markets
 # ─────────────────────────────────────────
 SYNTHETIC_MARKETS = [
-    # Tier 1 — proven performers, keep always
+    # Tier 1 — core, always active
     "R_50",
     "R_100",
     "1HZ50V",
     "JD50",
     "JD75",
-    # Tier 2 — moderate, monitor
+    # Tier 2 — solid performers
     "R_75",
     "JD100",
-    # Tier 3 — underperforming, removed for now
-    # "1HZ100V",   # 0% win rate in analysis
-    # "1HZ75V",    # insufficient data
-    # BOOM/CRASH removed — don't support Rise/Fall binary
+    # Tier 3 — re-enabled for more scan coverage
+    # Higher frequency = more signal opportunities per scan
+    "1HZ100V",
+    "1HZ75V",
 ]
 
 FOREX_MARKETS = [
@@ -59,6 +59,7 @@ COMMODITY_MARKETS = [
     "frxXAGUSD",   # Silver / USD
 ]
 
+# Forex pairs active during Asian session
 ASIAN_FOREX = ["frxAUDUSD", "frxUSDJPY", "frxUSDCAD", "frxEURJPY"]
 
 MARKETS = list(dict.fromkeys(FOREX_MARKETS + COMMODITY_MARKETS + SYNTHETIC_MARKETS))
@@ -68,48 +69,65 @@ MARKETS = list(dict.fromkeys(FOREX_MARKETS + COMMODITY_MARKETS + SYNTHETIC_MARKE
 # ─────────────────────────────────────────
 def get_current_session() -> str:
     hour = datetime.now(timezone.utc).hour
-    if 13 <= hour < 17:  return "LONDON_NY_OVERLAP"
-    if 8  <= hour < 17:  return "LONDON"
-    if 17 <= hour < 20:  return "NEW_YORK"
-    if 0  <= hour < 7:   return "ASIAN"
-    return "DEAD_ZONE"
+    if 13 <= hour < 17: return "LONDON_NY_OVERLAP"
+    if 8  <= hour < 13: return "LONDON"
+    if 17 <= hour < 22: return "NEW_YORK"   # extended to 22:00 UTC
+    if 0  <= hour < 7:  return "ASIAN"
+    return "DEAD_ZONE"                       # 22:00-00:00 UTC only
 
 def is_weekend() -> bool:
     day  = datetime.now(timezone.utc).weekday()
     hour = datetime.now(timezone.utc).hour
-    if day == 4 and hour >= 21: return True
-    if day == 5:                return True
-    if day == 6 and hour < 21:  return True
+    if day == 4 and hour >= 21: return True  # Friday 21:00 UTC+
+    if day == 5:                return True  # Saturday
+    if day == 6 and hour < 21:  return True  # Sunday until 21:00 UTC
     return False
 
 def get_active_markets() -> list:
     if is_weekend():
         return SYNTHETIC_MARKETS
+
     session = get_current_session()
+
     if session in ("LONDON_NY_OVERLAP", "LONDON", "NEW_YORK"):
         return FOREX_MARKETS + COMMODITY_MARKETS + SYNTHETIC_MARKETS
+
     if session == "ASIAN":
         return ASIAN_FOREX + SYNTHETIC_MARKETS
+
+    # DEAD_ZONE: synthetics only (22:00-00:00 UTC)
     return SYNTHETIC_MARKETS
 
 # ─────────────────────────────────────────
 # Expiry (minutes)
 # ─────────────────────────────────────────
 SYNTHETIC_EXPIRY = {
-    "R_50": 3,   "R_75": 3,   "R_100": 2,
-    "1HZ50V": 1, "1HZ75V": 1, "1HZ100V": 1,
-    "JD50": 1,   "JD75": 1,   "JD100": 1,
-    "BOOM500": 1,  "BOOM1000": 1,
-    "CRASH500": 1, "CRASH1000": 1,
+    # Standard volatility indices — 2m gives better payout than 3m
+    "R_50":    2,
+    "R_75":    2,
+    "R_100":   2,
+    # High-frequency 1Hz indices — 1m is the sweet spot
+    "1HZ50V":  1,
+    "1HZ75V":  1,
+    "1HZ100V": 1,
+    # Jump indices — 1m optimal
+    "JD50":    1,
+    "JD75":    1,
+    "JD100":   1,
+    # Boom/Crash — not currently active
+    "BOOM500":   1,
+    "BOOM1000":  1,
+    "CRASH500":  1,
+    "CRASH1000": 1,
 }
 
-FOREX_EXPIRY_OPTIONS      = [15, 30, 60, 120]
-COMMODITY_EXPIRY_OPTIONS  = [15, 30, 60]
+FOREX_EXPIRY_OPTIONS     = [15, 30, 60, 120]
+COMMODITY_EXPIRY_OPTIONS = [15, 30, 60]
 
 def get_expiry(market: str) -> int:
     if is_commodity(market): return COMMODITY_EXPIRY_OPTIONS[0]
     if is_forex(market):     return FOREX_EXPIRY_OPTIONS[0]
-    return SYNTHETIC_EXPIRY.get(market, 3)
+    return SYNTHETIC_EXPIRY.get(market, 2)
 
 def is_forex(market: str) -> bool:
     return market.startswith("frx") and not is_commodity(market)
