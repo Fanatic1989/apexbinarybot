@@ -167,7 +167,7 @@
     <div class="tbl-wrap">
       <table>
         <thead><tr>
-          <th>Time (UTC)</th><th>Market</th><th>Type</th><th>Direction</th>
+          <th>Time</th><th>Market</th><th>Type</th><th>Direction</th>
           <th>Expiry</th><th>Timer</th><th>Stake</th><th>Payout</th>
           <th>Strategy</th><th>Confidence</th><th>Result</th><th>P&amp;L</th>
         </tr></thead>
@@ -420,6 +420,7 @@ function loadTrades(){
         :pnl<0?badge('-$'+Math.abs(pnl).toFixed(2),'rgba(255,77,109,0.1)','#ff4d6d','rgba(255,77,109,0.25)')
         :'<span style="color:#64748b;font-family:var(--mono);font-size:11px">—</span>';
       const tt=t.time?new Date(t.time.replace(' UTC','Z')):null;
+      const tttStr=tt?toTTTFull(tt):(t.time||'—');
       const em=parseFloat(t.expiry||0);
       const sa=tt?new Date(tt.getTime()+em*60000):null;
       const lm=sa?sa-Date.now():-1;
@@ -429,7 +430,7 @@ function loadTrades(){
       else if(lm<=0) tmr='<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
       else tmr=`<span id="tmr-${cid}" data-settle="${sa.getTime()}" data-dur="${em}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--green)">—</span>`;
       newHtml+=`<tr data-cid="${cid}">
-        <td style="font-family:var(--mono);font-size:10px;white-space:nowrap">${t.time||'—'}</td>
+        <td style="font-family:var(--mono);font-size:10px;white-space:nowrap">${tttStr}</td>
         <td><code style="color:var(--blue);font-size:11px">${t.symbol||t.market||'—'}</code></td>
         <td>${typePill}</td><td>${dirPill}</td>
         <td style="font-family:var(--mono)">${t.expiry||'—'}m</td>
@@ -482,6 +483,13 @@ function loadLog(){
     const box=document.getElementById('log-box');
     let h='';
     (d.lines||[]).forEach(l=>{
+      // Convert UTC log timestamp to TTT (UTC-4)
+      l = l.replace(/^(\d{2}:\d{2}:\d{2})/, function(match, utcTime) {
+        const parts = utcTime.split(':');
+        const d = new Date();
+        d.setUTCHours(parseInt(parts[0]), parseInt(parts[1]), parseInt(parts[2]), 0);
+        return toTTT(d);
+      });
       const cls=l.includes('ERROR')?'er':l.includes('WARN')?'wa':l.includes('WIN')||l.includes('✅')?'ok':'in';
       const s=l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       h+=`<div class="${cls}">${s}</div>`;
@@ -628,7 +636,7 @@ setInterval(function(){
     if(tc&&tc.textContent.includes('Settling')){
       const timeCell=row.querySelector('td:first-child');
       if(timeCell){
-        const t=new Date(timeCell.textContent.replace(' UTC','Z'));
+        const t=new Date(timeCell.textContent.replace(/-/g,'/').replace(' ','T')+'Z');
         const expTd=row.querySelector('td:nth-child(5)');
         const expM=parseFloat(expTd?expTd.textContent:1);
         const settleAt=new Date(t.getTime()+expM*60000);
@@ -662,11 +670,30 @@ function toast(msg){
   setTimeout(()=>t.style.display='none',2500);
 }
 
+// ── Trinidad time (UTC-4, no DST) ───────────────────────────
+function toTTT(date) {
+  const ttt = new Date(date.getTime() - 4 * 60 * 60 * 1000);
+  const h   = ttt.getUTCHours().toString().padStart(2,'0');
+  const m   = ttt.getUTCMinutes().toString().padStart(2,'0');
+  const s   = ttt.getUTCSeconds().toString().padStart(2,'0');
+  return h+':'+m+':'+s;
+}
+function toTTTFull(date) {
+  const ttt  = new Date(date.getTime() - 4 * 60 * 60 * 1000);
+  const yyyy = ttt.getUTCFullYear();
+  const mo   = (ttt.getUTCMonth()+1).toString().padStart(2,'0');
+  const dd   = ttt.getUTCDate().toString().padStart(2,'0');
+  const h    = ttt.getUTCHours().toString().padStart(2,'0');
+  const mn   = ttt.getUTCMinutes().toString().padStart(2,'0');
+  const sc   = ttt.getUTCSeconds().toString().padStart(2,'0');
+  return yyyy+'-'+mo+'-'+dd+' '+h+':'+mn+':'+sc;
+}
+
 function loadAll(){
   loadStatus();
   loadTrades();
   loadLog();
-  document.getElementById('refresh-tick').textContent='Last refresh: '+new Date().toLocaleTimeString();
+  document.getElementById('refresh-tick').textContent='Last refresh: '+toTTT(new Date());
 }
 
 loadAll();
