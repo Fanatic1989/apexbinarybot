@@ -23,7 +23,7 @@ ACTIVE_TOKEN = get_active_token()
 # ─────────────────────────────────────────
 # Scan & candle settings
 # ─────────────────────────────────────────
-SCAN_INTERVAL      = int(os.getenv("SCAN_INTERVAL", 60))
+SCAN_INTERVAL      = int(os.getenv("SCAN_INTERVAL", 45))
 CANDLE_GRANULARITY = 60
 CANDLE_COUNT       = 120
 HTF_GRANULARITY    = 3600
