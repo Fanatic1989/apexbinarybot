@@ -253,7 +253,10 @@ class NewsFilter:
                     continue
 
                 if is_synth:
-                    if impact == "High":
+                    # Synthetics only pause for USD HIGH impact events
+                    # (they are USD-denominated Deriv products)
+                    # Other currency HIGH events don't affect them
+                    if impact == "High" and cur == "USD":
                         return True, f"📰 {title} (HIGH)"
                     continue
 
@@ -269,7 +272,8 @@ class NewsFilter:
                 if not self._is_within_window(start, end, now_min):
                     continue
                 if is_synth:
-                    if label not in ("NFP / Payrolls", "FOMC Window"):
+                    # Only block synthetics for the biggest USD events
+                    if label not in ("NFP / Payrolls", "FOMC Window", "ADP Employment"):
                         continue
                 else:
                     if "ALL" not in currencies:
