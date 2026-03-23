@@ -38,8 +38,8 @@ _last_regime    = {}   # market -> last detected regime (for TS recording)
 SESSION_1_HOURS = 12
 REST_HOURS      = 1
 SESSION_2_HOURS = 11
-MAX_TRADES_S1   = 55
-MAX_TRADES_S2   = 45
+MAX_TRADES_S1   = 80
+MAX_TRADES_S2   = 60
 
 # ─────────────────────────────────────────
 # MINIMUM PAYOUT RATIO PER RISK LEVEL
@@ -384,9 +384,10 @@ def _parallel_scan(markets):
     dominant_pts = put_count  if direction == "PUT"  else call_count
     minority_pts = call_count if direction == "PUT"  else put_count
 
-    # Require at least 2-point lead to trade — avoids razor-thin margins
-    if dominant_pts - minority_pts < 2:
-        log.info(f"[BOT] Margin too thin: {put_count}P vs {call_count}C — skip")
+    # Require at least 1-point lead to trade
+    # A single HIGH signal (2pts) beating a NORMAL (1pt) is enough
+    if dominant_pts <= minority_pts:
+        log.info(f"[BOT] Tied or losing: {put_count}P vs {call_count}C — skip")
         return
 
     log.info(f"[BOT] Dominant: {direction} "
