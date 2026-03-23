@@ -280,7 +280,7 @@ def _parallel_scan(markets):
             from news_filter import news_filter
             blocked, reason = news_filter.is_news_time(market)
             if blocked:
-                log.info(f"[{market}] 📰 {reason}")
+                log.info(f"[{market}] {reason}")
                 return
             candles = get_candles(market)
             if not candles or len(candles) < 40:
