@@ -384,10 +384,19 @@ def _parallel_scan(markets):
     dominant_pts = put_count  if direction == "PUT"  else call_count
     minority_pts = call_count if direction == "PUT"  else put_count
 
-    # Require at least 1-point lead to trade
-    # A single HIGH signal (2pts) beating a NORMAL (1pt) is enough
+    # Require dominant side to have at least 60% of total weighted points
+    # This prevents trading when markets are genuinely split (e.g. 6pts vs 4pts)
+    total_pts = dominant_pts + minority_pts
+    dominance_ratio = dominant_pts / total_pts if total_pts > 0 else 0
+
     if dominant_pts <= minority_pts:
         log.info(f"[BOT] Tied or losing: {put_count}P vs {call_count}C — skip")
+        return
+
+    if dominance_ratio < 0.65:
+        log.info(f"[BOT] Market split {put_count}P({put_count if direction=='PUT' else call_count}pts) vs "
+                 f"{call_raw}C({call_count if direction=='PUT' else put_count}pts) — "
+                 f"dominance {dominance_ratio:.0%} < 65% — skip")
         return
 
     log.info(f"[BOT] Dominant: {direction} "
