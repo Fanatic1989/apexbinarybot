@@ -241,3 +241,51 @@ def admin_set_role(username: str, role: str) -> dict:
     user["role"] = role
     _save(data)
     return {"ok": True}
+
+
+def change_password(username: str, current_password: str,
+                    new_password: str) -> dict:
+    """Allow a user to change their own password."""
+    data  = _load()
+    uname = username.lower()
+    user  = data["users"].get(uname)
+    if not user:
+        return {"ok": False, "error": "User not found"}
+
+    # Verify current password
+    expected = _hash_password(current_password, user["salt"])
+    if expected != user["password_hash"]:
+        return {"ok": False, "error": "Current password is incorrect"}
+
+    if len(new_password) < 6:
+        return {"ok": False, "error": "Password must be at least 6 characters"}
+
+    # Set new password
+    new_salt = secrets.token_hex(16)
+    user["salt"]          = new_salt
+    user["password_hash"] = _hash_password(new_password, new_salt)
+    _save(data)
+    log.info(f"[USERS] Password changed for {username}")
+    return {"ok": True}
+
+
+def delete_user(username: str) -> dict:
+    """Permanently delete a user account."""
+    import os
+    data  = _load()
+    uname = username.lower()
+    if uname not in data["users"]:
+        return {"ok": False, "error": "User not found"}
+
+    del data["users"][uname]
+    _save(data)
+
+    # Remove their trade history file
+    trade_file = f"trades_{uname}.json"
+    try:
+        if os.path.exists(trade_file):
+            os.remove(trade_file)
+    except: pass
+
+    log.info(f"[USERS] Deleted account: {username}")
+    return {"ok": True}
