@@ -135,6 +135,46 @@
     <div class="metric ma"><div class="mv amb" id="m-con">—</div><div class="ml">Consec. Losses</div></div>
   </div>
 
+
+  <!-- P&L Progress Bars -->
+  <div class="card" style="padding:14px 20px;margin-bottom:14px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+
+      <!-- Daily Profit Target -->
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:10px;font-family:var(--mono);font-weight:700;color:var(--green);letter-spacing:.08em">🎯 DAILY PROFIT TARGET</span>
+          <span id="profit-pct-label" style="font-family:var(--mono);font-size:11px;color:var(--green)">0%</span>
+        </div>
+        <div style="background:var(--bg3);border-radius:6px;height:10px;overflow:hidden;border:1px solid var(--bdr)">
+          <div id="profit-bar" style="height:10px;border-radius:6px;background:linear-gradient(90deg,#00f5a0,#00c97a);width:0%;transition:width .5s;position:relative">
+            <div style="position:absolute;inset:0;background:linear-gradient(90deg,transparent 60%,rgba(255,255,255,0.15));border-radius:6px"></div>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:5px">
+          <span id="profit-current" style="font-size:10px;font-family:var(--mono);color:var(--muted)">+$0.00</span>
+          <span id="profit-target" style="font-size:10px;font-family:var(--mono);color:var(--muted)">Target: $0.00</span>
+        </div>
+      </div>
+
+      <!-- Daily Loss Limit -->
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:10px;font-family:var(--mono);font-weight:700;color:var(--red);letter-spacing:.08em">🛡️ DAILY LOSS LIMIT</span>
+          <span id="loss-pct-label" style="font-family:var(--mono);font-size:11px;color:var(--green)">Safe</span>
+        </div>
+        <div style="background:var(--bg3);border-radius:6px;height:10px;overflow:hidden;border:1px solid var(--bdr)">
+          <div id="loss-bar" style="height:10px;border-radius:6px;background:linear-gradient(90deg,#00f5a0,#ffb347);width:0%;transition:width .5s"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:5px">
+          <span id="loss-current" style="font-size:10px;font-family:var(--mono);color:var(--muted)">-$0.00</span>
+          <span id="loss-limit" style="font-size:10px;font-family:var(--mono);color:var(--muted)">Limit: $0.00</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
   <div class="card">
     <div class="ctitle">Bot Control</div>
     <div class="btn-row">
@@ -395,6 +435,7 @@ function loadStatus(){
       setText('m-con',r.consec_losses||0);
     }
     if(d.last_signals)buildMktGrid(d.last_signals);
+    updatePnLBars(d.risk, d.config);
     if(d.risk_pct&&d.risk_pct!==currentRisk)currentRisk=d.risk_pct;
     if(r&&r.balance)updateRiskDisplay(currentRisk,r.balance);
     if(d.ai_strategy)buildAIPanel(d.ai_strategy);
@@ -571,6 +612,62 @@ function loadPayments(){
     });
     document.getElementById('pay-tbody').innerHTML=h;
   });
+}
+
+
+// ── P&L Progress Bars ─────────────────────────────────────────
+function updatePnLBars(r, cfg) {
+  if(!r) return;
+
+  const balance      = parseFloat(r.balance)       || 0;
+  const dailyProfit  = parseFloat(r.daily_profit)  || 0;
+  const dailyLoss    = Math.abs(parseFloat(r.daily_loss) || 0);
+
+  // Target = 5% of balance (or from config)
+  const targetPct    = parseFloat((cfg && cfg.daily_profit_target) || 5);
+  const limitPct     = parseFloat((cfg && cfg.max_daily_loss_pct)  || 5);
+  const profitTarget = balance * (targetPct / 100);
+  const lossLimit    = balance * (limitPct  / 100);
+
+  // Profit bar
+  const profitPct  = profitTarget > 0 ? Math.min(100, (dailyProfit / profitTarget) * 100) : 0;
+  const profitBar  = document.getElementById('profit-bar');
+  const profitLbl  = document.getElementById('profit-pct-label');
+  const profitCur  = document.getElementById('profit-current');
+  const profitTgt  = document.getElementById('profit-target');
+  if(profitBar){
+    profitBar.style.width = profitPct + '%';
+    if(profitPct >= 100){
+      profitBar.style.background = 'linear-gradient(90deg,#00f5a0,#00e090)';
+    } else if(profitPct >= 75){
+      profitBar.style.background = 'linear-gradient(90deg,#00f5a0,#00c97a)';
+    }
+  }
+  if(profitLbl) profitLbl.textContent = profitPct.toFixed(1) + '%';
+  if(profitCur) profitCur.textContent = '+$' + dailyProfit.toFixed(2);
+  if(profitTgt) profitTgt.textContent = 'Target: $' + profitTarget.toFixed(2);
+
+  // Loss bar — colour shifts red as you approach limit
+  const lossPct  = lossLimit > 0 ? Math.min(100, (dailyLoss / lossLimit) * 100) : 0;
+  const lossBar  = document.getElementById('loss-bar');
+  const lossLbl  = document.getElementById('loss-pct-label');
+  const lossCur  = document.getElementById('loss-current');
+  const lossLim  = document.getElementById('loss-limit');
+  if(lossBar){
+    lossBar.style.width = lossPct + '%';
+    if(lossPct >= 80){
+      lossBar.style.background = 'linear-gradient(90deg,#ffb347,#ff4d6d)';
+      if(lossLbl){ lossLbl.textContent = '⚠️ ' + lossPct.toFixed(1) + '%'; lossLbl.style.color='var(--red)'; }
+    } else if(lossPct >= 50){
+      lossBar.style.background = 'linear-gradient(90deg,#ffb347,#ff8c00)';
+      if(lossLbl){ lossLbl.textContent = lossPct.toFixed(1) + '%'; lossLbl.style.color='var(--amber)'; }
+    } else {
+      lossBar.style.background = 'linear-gradient(90deg,#00f5a0,#ffb347)';
+      if(lossLbl){ lossLbl.textContent = 'Safe'; lossLbl.style.color='var(--green)'; }
+    }
+  }
+  if(lossCur) lossCur.textContent = '-$' + dailyLoss.toFixed(2);
+  if(lossLim) lossLim.textContent = 'Limit: $' + lossLimit.toFixed(2);
 }
 
 // ── Market grid & news ────────────────────────────────────────
