@@ -77,6 +77,7 @@ def register_user(username: str, password: str,
         "mode":            "demo",
         "risk_pct":        1,
         "bot_running":     False,
+        "account_type":    "paid",   # paid | free
         # Stats
         "total_trades":    0,
         "total_wins":      0,
@@ -172,6 +173,7 @@ def update_user_settings(username: str, **kwargs) -> dict:
         "risk_pct", "email", "bot_running",
         "total_trades", "total_wins",
         "total_losses", "net_pnl",
+        "account_type",
     }
     for k, v in kwargs.items():
         if k in allowed:
