@@ -13,6 +13,7 @@ from risk_manager import RiskManager
 from staking import StakingEngine
 from telegram_bot import send_signal, send_alert
 from news_filter import news_filter
+from risk_state import save_state, load_state, restore_risk_manager, restore_staking
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
@@ -188,6 +189,18 @@ def run_bot():
     import bot as _s
     _s.risk_manager   = risk_manager
     _s.staking_engine = staking_engine
+
+    # Restore state from last session (preserves losses, daily P&L, consecutive count)
+    _saved_state = load_state()
+    if _saved_state:
+        restore_risk_manager(risk_manager, _saved_state)
+        restore_staking(staking_engine, _saved_state)
+        if _saved_state.get("current_balance", 0) > 0:
+            rb = float(_saved_state["current_balance"])
+            rs = max(rb * (config.STAKE_PERCENT / 100), 0.35)
+            staking_engine.base_stake    = rs
+            staking_engine.current_stake = rs
+            staking_engine.balance       = rb
 
     log.info(f"[BOT] Connected | Balance: ${balance:.2f} | Stake: ${base_stake:.2f}")
     send_alert(f"🚀 Apex Bot started\nMode: {config.MODE.upper()}\n"
@@ -533,6 +546,7 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
         with _global_lock:
             risk_manager.record_win(profit)
             staking_engine.record_win(profit)
+            save_state(risk_manager, staking_engine)
         _b._market_losses[market] = 0
         send_alert(f"✅ {market} {direction} WON +${profit:.2f}\n"
                    f"Strategy: {strategy}\n"
@@ -545,6 +559,7 @@ def _handle_outcome(market, direction, stake, outcome, trade, signal):
         with _global_lock:
             risk_manager.record_loss(stake)
             staking_engine.record_loss(stake)
+            save_state(risk_manager, staking_engine)
         send_alert(f"❌ {market} {direction} LOST -${stake:.2f}\n"
                    f"Strategy: {strategy}\n"
                    f"Balance: ${risk_manager.current_balance:.2f}")
