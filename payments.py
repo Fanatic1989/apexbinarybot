@@ -122,6 +122,17 @@ def handle_webhook(payload: dict) -> dict:
         log.warning(f"[PAY] Underpayment for {username}: ${price_amount}")
         return {"ok": False, "error": f"Underpayment: ${price_amount}"}
 
+    # Log the payment
+    _log_payment({
+        "username":    username,
+        "order_id":    order_id,
+        "payment_id":  payload.get("payment_id", ""),
+        "amount_usd":  price_amount,
+        "currency":    payload.get("pay_currency", PAY_CURRENCY),
+        "status":      payment_status,
+        "timestamp":   datetime.now(timezone.utc).isoformat(),
+    })
+
     # Activate subscription
     result = user_manager.admin_extend_subscription(username, days=SUB_DAYS)
     if result["ok"]:
@@ -154,3 +165,46 @@ def get_payment_status(payment_id: str) -> dict:
     except Exception as e:
         log.error(f"[PAY] Status check failed: {e}")
         return {}
+
+
+# ── Payment log ───────────────────────────────────────────────
+
+PAYMENTS_FILE = "payments_log.json"
+
+
+def _log_payment(record: dict):
+    try:
+        try:
+            with open(PAYMENTS_FILE) as f:
+                data = json.load(f)
+        except:
+            data = {"payments": []}
+        data["payments"].append(record)
+        with open(PAYMENTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.error(f"[PAY] Log failed: {e}")
+
+
+def get_payment_history() -> list:
+    try:
+        with open(PAYMENTS_FILE) as f:
+            return json.load(f).get("payments", [])
+    except:
+        return []
+
+
+def get_revenue_summary() -> dict:
+    payments = get_payment_history()
+    confirmed = [p for p in payments if p.get("status") in ("confirmed", "finished")]
+    total_usd  = sum(float(p.get("amount_usd", 0)) for p in confirmed)
+    by_user    = {}
+    for p in confirmed:
+        u = p.get("username", "unknown")
+        by_user[u] = by_user.get(u, 0) + 1
+    return {
+        "total_payments": len(confirmed),
+        "total_revenue":  round(total_usd, 2),
+        "by_user":        by_user,
+        "last_payment":   confirmed[-1] if confirmed else None,
+    }
