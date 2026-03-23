@@ -526,6 +526,24 @@ def admin_add_free_member():
         "ends":    sub_result.get("new_end", ""),
     })
 
+
+@app.route("/admin/delete-user", methods=["POST"])
+@login_required
+def admin_delete_user():
+    data     = request.get_json() or {}
+    username = data.get("username", "").strip()
+    if not username:
+        return jsonify({"ok": False, "error": "Username required"})
+    # Stop their bot first
+    try:
+        import bot_manager as bm
+        bm.stop_user_bot(username)
+    except: pass
+    result = um.delete_user(username)
+    if result["ok"]:
+        log.info(f"[ADMIN] Deleted user: {username}")
+    return jsonify(result)
+
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
 # ─────────────────────────────────────────
