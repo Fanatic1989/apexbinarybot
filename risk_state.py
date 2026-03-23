@@ -1,87 +1,95 @@
 """
 Risk State Persistence — saves and restores RiskManager state across restarts.
-Prevents loss counts and daily P&L from resetting on bot restart.
-Uses getattr/setattr safely to handle different RiskManager implementations.
+Prevents the bot from resetting loss counts and daily P&L on restart.
 """
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 STATE_FILE = "risk_state.json"
 
 
-def _rm_get(risk_manager, *attrs, default=0):
-    """Try multiple attribute names on risk_manager, return first found."""
-    # Try get_summary() dict first
-    summary = {}
-    if hasattr(risk_manager, "get_summary"):
-        try:
-            summary = risk_manager.get_summary() or {}
-        except: pass
+def _sf(val, default=0.0) -> float:
+    """Safe float — returns default if val is None or unconvertible."""
+    try:
+        return float(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
 
+
+def _si(val, default=0) -> int:
+    """Safe int — returns default if val is None or unconvertible."""
+    try:
+        return int(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _get(obj, *attrs, default=0):
+    """Try multiple attribute names, return first that exists and isn't None."""
     for attr in attrs:
-        # Direct attribute
-        val = getattr(risk_manager, attr, None)
-        if val is not None:
-            return val
-        # In summary dict
-        val = summary.get(attr)
-        if val is not None:
-            return val
+        v = getattr(obj, attr, None)
+        if v is not None:
+            return v
     return default
 
 
 def save_state(risk_manager, staking_engine=None):
-    """Save current risk state to disk."""
+    """Save current risk state to disk after every trade."""
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         state = {
             "date":               today,
-            "current_balance":    float(_rm_get(risk_manager, "current_balance", "balance", default=0)),
-            "starting_balance":   float(_rm_get(risk_manager, "starting_balance", default=0)),
-            "total_trades":       int(_rm_get(risk_manager,   "total_trades",     default=0)),
-            "total_wins":         int(_rm_get(risk_manager,   "total_wins", "wins", default=0)),
-            "total_losses":       int(_rm_get(risk_manager,   "total_losses", "losses", default=0)),
-            "net_pnl":            float(_rm_get(risk_manager, "net_pnl",           default=0)),
-            "consecutive_losses": int(_rm_get(risk_manager,   "consecutive_losses", "consec_losses", default=0)),
-            "daily_loss":         float(_rm_get(risk_manager, "daily_loss",         default=0)),
-            "daily_profit":       float(_rm_get(risk_manager, "daily_profit",       default=0)),
-            "paused_until":       float(getattr(risk_manager, "_paused_until", 0)),
+            "current_balance":    _sf(_get(risk_manager, "current_balance", "balance")),
+            "starting_balance":   _sf(_get(risk_manager, "starting_balance")),
+            "total_trades":       _si(_get(risk_manager, "total_trades")),
+            "total_wins":         _si(_get(risk_manager, "total_wins", "wins")),
+            "total_losses":       _si(_get(risk_manager, "total_losses", "losses")),
+            "net_pnl":            _sf(_get(risk_manager, "net_pnl")),
+            "consecutive_losses": _si(_get(risk_manager, "consecutive_losses", "consec_losses")),
+            "daily_loss":         _sf(_get(risk_manager, "daily_loss")),
+            "daily_profit":       _sf(_get(risk_manager, "daily_profit")),
+            "paused_until":       _sf(_get(risk_manager, "_paused_until", "paused_until")),
         }
         if staking_engine:
             state["staking"] = {
-                "base_stake":    float(getattr(staking_engine, "base_stake",    0)),
-                "current_stake": float(getattr(staking_engine, "current_stake", 0)),
-                "balance":       float(getattr(staking_engine, "balance",       0)),
+                "base_stake":    _sf(_get(staking_engine, "base_stake")),
+                "current_stake": _sf(_get(staking_engine, "current_stake")),
+                "balance":       _sf(_get(staking_engine, "balance")),
             }
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
-        log.debug(f"[STATE] Saved — Bal:${state['current_balance']:.2f} "
+        log.debug(f"[STATE] Saved | Balance:${state['current_balance']:.2f} "
                   f"W:{state['total_wins']} L:{state['total_losses']} "
-                  f"Consec:{state['consecutive_losses']}")
+                  f"Consec:{state['consecutive_losses']} "
+                  f"DailyLoss:${state['daily_loss']:.2f}")
     except Exception as e:
         log.error(f"[STATE] Save failed: {e}")
 
 
 def load_state() -> dict:
-    """Load persisted state. Resets daily stats on new day."""
+    """Load saved state. Resets daily stats if it's a new day."""
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if state.get("date") != today:
-            log.info(f"[STATE] New day — resetting daily stats")
+            log.info(f"[STATE] New day — resetting daily stats "
+                     f"(was {state.get('date')}, now {today})")
             state["daily_loss"]         = 0.0
             state["daily_profit"]       = 0.0
             state["consecutive_losses"] = 0
-            state["paused_until"]       = 0
+            state["paused_until"]       = 0.0
             state["date"]               = today
-        log.info(f"[STATE] Restored — Bal:${state['current_balance']:.2f} "
-                 f"W:{state['total_wins']} L:{state['total_losses']} "
-                 f"Consec:{state['consecutive_losses']} "
-                 f"DailyLoss:${state['daily_loss']:.2f}")
+
+        log.info(f"[STATE] Restored | Balance:${state.get('current_balance',0):.2f} "
+                 f"W:{state.get('total_wins',0)} L:{state.get('total_losses',0)} "
+                 f"Consec:{state.get('consecutive_losses',0)} "
+                 f"DailyLoss:${state.get('daily_loss',0):.2f}")
         return state
+
     except FileNotFoundError:
         log.info("[STATE] No saved state — starting fresh")
         return None
@@ -91,52 +99,50 @@ def load_state() -> dict:
 
 
 def restore_risk_manager(risk_manager, state: dict):
-    """Restore RiskManager from saved state using safe setattr."""
+    """Apply saved state fields to RiskManager instance."""
     if not state:
         return
     try:
-        def _set(attr, key, cast=float):
-            if key in state and hasattr(risk_manager, attr):
+        fields = [
+            ("current_balance",    "current_balance",    float),
+            ("starting_balance",   "starting_balance",   float),
+            ("total_trades",       "total_trades",       int),
+            ("total_wins",         "total_wins",         int),
+            ("total_losses",       "total_losses",       int),
+            ("net_pnl",            "net_pnl",            float),
+            ("consecutive_losses", "consecutive_losses", int),
+            ("daily_loss",         "daily_loss",         float),
+            ("daily_profit",       "daily_profit",       float),
+        ]
+        for state_key, attr, cast in fields:
+            val = state.get(state_key)
+            if val is not None and hasattr(risk_manager, attr):
                 try:
-                    setattr(risk_manager, attr, cast(state[key]))
+                    setattr(risk_manager, attr, cast(val))
                 except: pass
 
-        _set("current_balance",    "current_balance")
-        _set("starting_balance",   "starting_balance")
-        _set("total_trades",       "total_trades",       int)
-        _set("total_wins",         "total_wins",         int)
-        _set("total_losses",       "total_losses",       int)
-        _set("net_pnl",            "net_pnl")
-        _set("consecutive_losses", "consecutive_losses", int)
-        _set("daily_loss",         "daily_loss")
-        _set("daily_profit",       "daily_profit")
-
         # Restore pause if still active
-        paused_until = float(state.get("paused_until", 0))
-        import time
-        if paused_until > time.time():
-            if hasattr(risk_manager, "_paused_until"):
-                risk_manager._paused_until = paused_until
-                log.info(f"[STATE] Pause restored — "
-                         f"{(paused_until - time.time())/60:.1f}min remaining")
+        paused_until = _sf(state.get("paused_until", 0))
+        if paused_until > 0 and hasattr(risk_manager, "_paused_until"):
+            risk_manager._paused_until = paused_until
 
-        log.info(f"[STATE] RiskManager restored — "
-                 f"Consec:{getattr(risk_manager,'consecutive_losses',0)} "
-                 f"DailyLoss:${getattr(risk_manager,'daily_loss',0):.2f}")
+        log.info(f"[STATE] RiskManager restored | "
+                 f"Consec:{risk_manager.consecutive_losses} "
+                 f"DailyLoss:${risk_manager.daily_loss:.2f}")
     except Exception as e:
-        log.error(f"[STATE] Restore failed: {e}")
+        log.error(f"[STATE] RiskManager restore failed: {e}")
 
 
 def restore_staking(staking_engine, state: dict):
-    """Restore staking engine from saved state."""
+    """Apply saved staking state."""
     if not state or "staking" not in state:
         return
     try:
         s = state["staking"]
         for attr in ("base_stake", "current_stake", "balance"):
             if attr in s and hasattr(staking_engine, attr):
-                setattr(staking_engine, attr, float(s[attr]))
-        log.info(f"[STATE] Staking restored — "
-                 f"Stake:${getattr(staking_engine,'current_stake',0):.2f}")
+                setattr(staking_engine, attr, _sf(s[attr]))
+        log.info(f"[STATE] Staking restored | "
+                 f"Stake:${staking_engine.current_stake:.2f}")
     except Exception as e:
         log.error(f"[STATE] Staking restore failed: {e}")
