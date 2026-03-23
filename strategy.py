@@ -185,13 +185,13 @@ def _synthetic_strategy(df, candles, market, regime):
     # ── TIER 3: Near extremes with confirmation ───────────────
     # Lowered threshold 0.92 → 0.88 so bb%=0.90/0.92 qualifies
     # ADX > 35 accepted as alternative to engulfing (strong trend = confirmation)
-    tier3_confirm = engulfing or strong_dir or adx_val > 35
+    tier3_confirm = engulfing or strong_dir or adx_val > 30
 
-    if bb_pct > 0.88 and tier3_confirm and last_bear and put_allowed:
+    if bb_pct > 0.82 and tier3_confirm and last_bear and put_allowed:
         log.info(f"[SYNTH] {market} PUT | Near upper {bb_pct:.2f} ADX={adx_val:.1f}")
         return _build(market, "PUT", "normal", candles, "bb_bounce")
 
-    if bb_pct < 0.12 and tier3_confirm and last_bull and call_allowed:
+    if bb_pct < 0.18 and tier3_confirm and last_bull and call_allowed:
         log.info(f"[SYNTH] {market} CALL | Near lower {bb_pct:.2f} ADX={adx_val:.1f}")
         return _build(market, "CALL", "normal", candles, "bb_bounce")
 
