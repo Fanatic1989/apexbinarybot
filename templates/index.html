@@ -286,6 +286,39 @@
     <div class="metric"><div class="mv" id="m-pnl">—</div><div class="ml">Net P&amp;L</div></div>
   </div>
 
+
+  <!-- P&L Progress Bars -->
+  <div class="card" style="padding:14px 20px;margin-bottom:14px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:10px;font-family:var(--mono);font-weight:700;color:var(--green);letter-spacing:.08em">🎯 DAILY PROFIT TARGET</span>
+          <span id="u-profit-pct" style="font-family:var(--mono);font-size:11px;color:var(--green)">0%</span>
+        </div>
+        <div style="background:var(--bg3);border-radius:6px;height:10px;overflow:hidden;border:1px solid var(--bdr)">
+          <div id="u-profit-bar" style="height:10px;border-radius:6px;background:linear-gradient(90deg,#00f5a0,#00c97a);width:0%;transition:width .5s"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:5px">
+          <span id="u-profit-cur" style="font-size:10px;font-family:var(--mono);color:var(--muted)">+$0.00</span>
+          <span id="u-profit-tgt" style="font-size:10px;font-family:var(--mono);color:var(--muted)">Target: —</span>
+        </div>
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:10px;font-family:var(--mono);font-weight:700;color:var(--red);letter-spacing:.08em">🛡️ DAILY LOSS LIMIT</span>
+          <span id="u-loss-pct" style="font-family:var(--mono);font-size:11px;color:var(--green)">Safe</span>
+        </div>
+        <div style="background:var(--bg3);border-radius:6px;height:10px;overflow:hidden;border:1px solid var(--bdr)">
+          <div id="u-loss-bar" style="height:10px;border-radius:6px;background:linear-gradient(90deg,#00f5a0,#ffb347);width:0%;transition:width .5s"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:5px">
+          <span id="u-loss-cur" style="font-size:10px;font-family:var(--mono);color:var(--muted)">-$0.00</span>
+          <span id="u-loss-lim" style="font-size:10px;font-family:var(--mono);color:var(--muted)">Limit: —</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Bot control -->
   <div class="card">
     <div class="ctitle">Bot Control</div>
@@ -517,6 +550,7 @@ function loadStatus() {
       pe.className='mv'+(pnl<0?' red':'');
     }
     buildSubBanner(d.subscription);
+    updateUserPnLBars(d.risk);
     if(d.last_signals) buildMktGrid(d.last_signals);
     if(d.risk_pct){
       document.querySelectorAll('.risk-btn').forEach(b=>b.classList.remove('active','warn','danger'));
@@ -554,6 +588,36 @@ function buildSubBanner(sub) {
     detail.textContent='Renew to resume trading';
     btn.style.display='inline-flex';
   }
+}
+
+
+function updateUserPnLBars(r) {
+  if(!r) return;
+  const balance     = parseFloat(r.balance)      || 0;
+  const dailyProfit = parseFloat(r.daily_profit) || 0;
+  const dailyLoss   = Math.abs(parseFloat(r.daily_loss) || 0);
+  const profitTarget = balance * 0.05;
+  const lossLimit    = balance * 0.05;
+
+  const profitPct = profitTarget > 0 ? Math.min(100,(dailyProfit/profitTarget)*100) : 0;
+  const lossPct   = lossLimit    > 0 ? Math.min(100,(dailyLoss/lossLimit)*100)      : 0;
+
+  const pb = document.getElementById('u-profit-bar');
+  if(pb) pb.style.width = profitPct+'%';
+  const el = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
+  el('u-profit-pct', profitPct.toFixed(1)+'%');
+  el('u-profit-cur', '+$'+dailyProfit.toFixed(2));
+  el('u-profit-tgt', 'Target: $'+profitTarget.toFixed(2));
+
+  const lb = document.getElementById('u-loss-bar');
+  const ll = document.getElementById('u-loss-pct');
+  if(lb){
+    lb.style.width = lossPct+'%';
+    lb.style.background = lossPct>=80?'linear-gradient(90deg,#ffb347,#ff4d6d)':lossPct>=50?'linear-gradient(90deg,#ffb347,#ff8c00)':'linear-gradient(90deg,#00f5a0,#ffb347)';
+  }
+  if(ll){ ll.textContent=lossPct>=80?'⚠️ '+lossPct.toFixed(1)+'%':lossPct>=50?lossPct.toFixed(1)+'%':'Safe'; ll.style.color=lossPct>=80?'var(--red)':lossPct>=50?'var(--amber)':'var(--green)'; }
+  el('u-loss-cur', '-$'+dailyLoss.toFixed(2));
+  el('u-loss-lim', 'Limit: $'+lossLimit.toFixed(2));
 }
 
 // ── Bot controls ──────────────────────────────────────────────
