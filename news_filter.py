@@ -182,20 +182,28 @@ class NewsFilter:
 
     # ── WINDOW HELPERS ─────────────────────────────────────────
 
-    def _event_to_window(self, event: Dict, now: datetime) -> Optional[tuple]:
+    def _event_to_window(self, event: Dict, now: datetime,
+                          is_synth: bool = False) -> Optional[tuple]:
         try:
             event_dt = event.get("timestamp")
             if not event_dt:
                 return None
 
-            buffer = 30 if event["impact"] == "High" else 15
+            # Synthetics: 5 min pre-buffer, 15 min post-buffer
+            # Forex: 30 min pre+post for HIGH, 15 min for MEDIUM
+            if is_synth:
+                pre_buf  = 5
+                post_buf = 15
+            else:
+                pre_buf  = 30 if event["impact"] == "High" else 15
+                post_buf = 30 if event["impact"] == "High" else 15
 
-            # Skip if the entire window (pre + post buffer) has passed
-            if event_dt + timedelta(minutes=buffer) < now:
+            # Skip if post-buffer has fully passed
+            if event_dt + timedelta(minutes=post_buf) < now:
                 return None
 
-            start_dt = event_dt - timedelta(minutes=buffer)
-            end_dt   = event_dt + timedelta(minutes=buffer)
+            start_dt = event_dt - timedelta(minutes=pre_buf)
+            end_dt   = event_dt + timedelta(minutes=post_buf)
 
             return (
                 start_dt.hour * 60 + start_dt.minute,
@@ -240,7 +248,7 @@ class NewsFilter:
                 events = self._dynamic_events[:]
 
             for event in events:
-                window = self._event_to_window(event, now)
+                window = self._event_to_window(event, now, is_synth=is_synth)
                 if not window:
                     continue
 
