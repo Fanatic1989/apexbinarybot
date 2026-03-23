@@ -125,7 +125,12 @@ def status():
         "last_signals":    getattr(bot, "last_signals", []),
         "ai_strategy":     ai_info,
         "risk_pct":        int(config.STAKE_PERCENT),
-        "news_events":     _get_upcoming_news()
+        "news_events":     _get_upcoming_news(),
+        "config": {
+            "daily_profit_target": config.DAILY_PROFIT_TARGET,
+            "max_daily_loss_pct":  config.MAX_DAILY_LOSS_PCT,
+            "stake_percent":       config.STAKE_PERCENT,
+        }
     })
 
 
