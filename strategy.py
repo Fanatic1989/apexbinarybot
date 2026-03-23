@@ -686,18 +686,16 @@ def _build(market, direction, base_conf, candles, strategy_name):
     result = sniper_confirm(candles, raw)
     score  = result.get("score", 0)
 
-    if base_conf == "high":
-        if score >= 2:
-            result["confirmed"]  = True
-            result["confidence"] = "high" if score == 3 else "normal"
-        else:
-            result["confirmed"]  = False
+    if score >= 3:
+        # Perfect sniper score always = HIGH regardless of base confidence
+        result["confirmed"]  = True
+        result["confidence"] = "high"
+    elif score >= 2:
+        result["confirmed"]  = True
+        result["confidence"] = "high" if base_conf == "high" else "normal"
     else:
-        if score >= 2:
-            result["confirmed"]  = True
-            result["confidence"] = "normal"
-        else:
-            result["confirmed"]  = False
+        result["confirmed"]  = False
+        result["confidence"] = "low"
 
     result["strategy"] = strategy_name
     return result
