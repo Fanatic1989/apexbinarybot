@@ -523,6 +523,15 @@ function addFreeMember(){
 function extendUser(username,days){
   fetch('/admin/extend-subscription',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,days})}).then(r=>r.json()).then(d=>{if(d.ok){toast(username+' extended +'+days+'d ✓');loadUsers();}else toast(d.error||'Failed');});
 }
+function deleteUser(username){
+  if(!confirm('DELETE '+username+'?\nThis permanently removes the account and all their data.\nThis cannot be undone.')) return;
+  fetch('/admin/delete-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){ toast(username+' deleted'); loadUsers(); }
+      else toast(d.error||'Failed to delete');
+    });
+}
+
 function suspendUser(username,suspend){
   fetch('/admin/suspend-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,suspend})}).then(r=>r.json()).then(d=>{if(d.ok){toast(username+' '+(suspend?'suspended':'unsuspended'));loadUsers();}else toast(d.error||'Failed');});
 }
