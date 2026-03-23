@@ -495,6 +495,37 @@ def admin_payments():
     except Exception as e:
         return jsonify({"payments": [], "summary": {}, "error": str(e)})
 
+
+@app.route("/admin/add-free-member", methods=["POST"])
+@login_required
+def admin_add_free_member():
+    data     = request.get_json() or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    days     = int(data.get("days", 30))
+
+    if not username or not password:
+        return jsonify({"ok": False, "error": "Username and password required"})
+
+    # Register the user
+    result = um.register_user(username, password, email="")
+    if not result["ok"]:
+        return jsonify(result)
+
+    # Mark as free/influencer account
+    um.update_user_settings(username, account_type="free")
+
+    # Give them free access for specified days
+    sub_result = um.admin_extend_subscription(username, days=days)
+
+    log.info(f"[ADMIN] Free member added: {username} ({days} days)")
+    return jsonify({
+        "ok":      True,
+        "username": username,
+        "days":    days,
+        "ends":    sub_result.get("new_end", ""),
+    })
+
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
 # ─────────────────────────────────────────
