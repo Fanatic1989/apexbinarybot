@@ -207,6 +207,19 @@ def save_tokens():
     return jsonify(result)
 
 
+@user_bp.route("/change-password", methods=["POST"])
+@user_login_required
+def change_password():
+    username = session["username"]
+    data     = request.get_json() or {}
+    current  = data.get("current", "").strip()
+    new_pw   = data.get("new_password", "").strip()
+    result   = um.change_password(username, current, new_pw)
+    if result["ok"]:
+        log.info(f"[USER] {username} changed password")
+    return jsonify(result)
+
+
 # ── Trades ────────────────────────────────────────────────────
 
 @user_bp.route("/trades")
