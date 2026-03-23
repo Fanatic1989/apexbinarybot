@@ -46,7 +46,7 @@ TRADE_HISTORY_FILE = "trade_history.json"
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("logged_in") or session.get("user_logged_in"):
+        if not session.get("logged_in"):
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
@@ -63,6 +63,7 @@ def login():
         password = request.form.get("password", "").strip()
 
         if username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
+            session.clear()                      # wipe any user session first
             session["logged_in"] = True
             session["username"]  = username
             log.info(f"[SERVER] Login successful for '{username}'")
@@ -88,9 +89,7 @@ def logout():
 # ─────────────────────────────────────────
 @app.route("/")
 def admin_dashboard():
-    # Admin session (logged_in=True) → bot dashboard
-    # User session (user_logged_in=True) or no session → index.html SPA
-    if session.get("logged_in") and not session.get("user_logged_in"):
+    if session.get("logged_in"):
         return render_template("dashboard.html")
     return render_template("index.html")
 
@@ -483,6 +482,18 @@ def admin_suspend():
     suspend  = bool(data.get("suspend", True))
     result   = um.admin_suspend_user(username, suspend)
     return jsonify(result)
+
+
+@app.route("/admin/payments")
+@login_required
+def admin_payments():
+    try:
+        import payments as pay
+        history = pay.get_payment_history()
+        summary = pay.get_revenue_summary()
+        return jsonify({"payments": history, "summary": summary})
+    except Exception as e:
+        return jsonify({"payments": [], "summary": {}, "error": str(e)})
 
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
