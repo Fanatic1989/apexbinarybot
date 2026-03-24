@@ -335,7 +335,7 @@ def _synthetic_strategy(df, candles, market, regime):
         if _consecutive_outside_band(df, upper, lower, "PUT"):
             if call_allowed:
                 log.info(f"[SYNTH] {market} CALL | Sustained breakout UP — following")
-                return _build(market, "CALL", "high", candles, "false_breakout")
+                return _build(market, "CALL", "high", candles, "donchian_breakout")
             return _no_signal(market)
         conf = "high" if bb_pct > 1.05 else "normal"
         log.info(f"[SYNTH] {market} PUT | Above upper band {bb_pct:.2f}")
@@ -346,7 +346,7 @@ def _synthetic_strategy(df, candles, market, regime):
         if _consecutive_outside_band(df, upper, lower, "CALL"):
             if put_allowed:
                 log.info(f"[SYNTH] {market} PUT | Sustained breakout DOWN — following")
-                return _build(market, "PUT", "high", candles, "false_breakout")
+                return _build(market, "PUT", "high", candles, "donchian_breakout")
             return _no_signal(market)
         conf = "high" if bb_pct < -0.05 else "normal"
         log.info(f"[SYNTH] {market} CALL | Below lower band {bb_pct:.2f}")
@@ -377,7 +377,7 @@ def _synthetic_strategy(df, candles, market, regime):
     if regime == "trending" and adx_val > 30:
         if _donchian_breakout(df, "CALL") and call_allowed:
             log.info(f"[SYNTH] {market} CALL | Donchian breakout high ADX={adx_val:.1f}")
-            return _build(market, "CALL", "high", candles, "false_breakout")
+            return _build(market, "CALL", "high", candles, "donchian_breakout")
         if _donchian_breakout(df, "PUT") and put_allowed:
             log.info(f"[SYNTH] {market} PUT | Donchian breakout low ADX={adx_val:.1f}")
             return _build(market, "PUT", "high", candles, "false_breakout")
