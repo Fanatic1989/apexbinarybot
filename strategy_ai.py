@@ -22,13 +22,14 @@ from datetime import datetime, timezone
 log = logging.getLogger(__name__)
 
 STRATEGIES = [
-    "bb_bounce",       # Bollinger Band mean reversion
-    "rsi_reversal",    # RSI extreme reversal
-    "false_breakout",  # False breakout reversal
-    "momentum_streak", # Trend continuation
-    "fvg_retest",      # Fair Value Gap retest (commodities/forex)
-    "pivot_stochrsi",  # Pivot Point + Stoch RSI (forex)
-    "ema_triple",      # Triple EMA alignment
+    "bb_bounce",          # Bollinger Band mean reversion
+    "rsi_reversal",       # RSI extreme reversal
+    "false_breakout",     # Micro-breakout + consecutive band following
+    "momentum_streak",    # Trend continuation (5M confirmed)
+    "fvg_retest",         # Fair Value Gap retest (commodities/forex)
+    "pivot_stochrsi",     # Pivot Point + Stoch RSI (forex)
+    "ema_triple",         # Triple EMA alignment
+    "donchian_breakout",  # Donchian channel volatility breakout
 ]
 
 # ─────────────────────────────────────────────────────────────────
@@ -61,40 +62,57 @@ STRATEGIES = [
 
 BACKTESTED_PRIORS = {
     # strategy: {regime: (win_rate_pct, pseudo_trade_count)}
+    # v4.2 update: false_breakout and momentum_streak priors raised
+    # because 5M confirmation filter now screens out low-quality setups.
+    # donchian_breakout added as new strategy.
+
     "bb_bounce": {
         "trending": (52, 20),   # BB fades work poorly against trends
         "ranging":  (63, 40),   # Core strength — ranging = BB paradise
-        "any":      (58, 30),   # Blended
+        "any":      (58, 30),
     },
     "rsi_reversal": {
-        "trending": (48, 20),   # Dangerous in strong trends (keeps overshooting)
-        "ranging":  (65, 40),   # Excellent — RSI works best in ranging markets
+        "trending": (48, 20),   # Dangerous in strong trends
+        "ranging":  (65, 40),   # Excellent in ranging
         "any":      (56, 30),
     },
     "false_breakout": {
-        "trending": (62, 30),   # Classic — breakouts in trends often continue
-        "ranging":  (54, 20),   # Less reliable — ranging = more true breakouts
-        "any":      (58, 25),
+        # v4.2: Now includes Donchian + consecutive band following
+        # 5M confirmation raises quality — priors bumped up
+        "trending": (65, 30),   # Strong — confirmed by 5M + Donchian
+        "ranging":  (55, 20),   # Moderate — fewer clean breakouts
+        "any":      (61, 25),
     },
     "momentum_streak": {
-        "trending": (60, 30),   # Goes with the trend — strong edge
-        "ranging":  (46, 20),   # Terrible in ranging — fades quickly
-        "any":      (53, 25),
+        # v4.2: 5M confirmation filters out counter-trend entries
+        # Higher quality entries — priors raised from 60→64 trending
+        "trending": (64, 30),   # 5M aligned = high quality momentum
+        "ranging":  (46, 20),   # Still poor in ranging
+        "any":      (55, 25),
     },
     "fvg_retest": {
-        "trending": (64, 35),   # FVGs are most reliable in trending moves
-        "ranging":  (51, 15),   # Fewer clean FVGs form in ranging markets
-        "any":      (60, 30),
+        # v4.2: 5M confirmation added for forex FVG entries
+        "trending": (66, 35),   # FVGs + 5M alignment = very strong
+        "ranging":  (51, 15),   # Fewer clean FVGs in ranging
+        "any":      (62, 30),
     },
     "pivot_stochrsi": {
-        "trending": (54, 20),   # Pivots matter less when trend is strong
-        "ranging":  (62, 35),   # Pivots + stoch = excellent ranging combo
+        "trending": (54, 20),
+        "ranging":  (62, 35),
         "any":      (58, 28),
     },
     "ema_triple": {
-        "trending": (57, 25),   # EMA alignment good in trends
-        "ranging":  (49, 20),   # EMAs whipsaw in ranging markets
+        "trending": (57, 25),
+        "ranging":  (49, 20),
         "any":      (53, 22),
+    },
+    "donchian_breakout": {
+        # NEW v4.2: ATR compression + Donchian channel break
+        # Captures explosive moves after consolidation
+        # Only fires in trending regime with ADX > 30
+        "trending": (63, 20),   # Medium confidence — new strategy
+        "ranging":  (45, 10),   # Rarely fires in ranging — low confidence
+        "any":      (57, 15),
     },
 }
 
@@ -523,11 +541,13 @@ class AIStrategySelector:
     """
 
     MARKET_WEIGHTS = {
-        "R_100":     {"bb_bounce":1.5, "rsi_reversal":1.4, "ema_triple":0.4},
-        "1HZ100V":   {"bb_bounce":1.5, "rsi_reversal":1.4, "ema_triple":0.4},
-        "JD100":     {"bb_bounce":1.4, "rsi_reversal":1.3},
-        "R_75":      {"bb_bounce":1.3, "rsi_reversal":1.3, "momentum_streak":1.2},
-        "R_50":      {"bb_bounce":1.4, "rsi_reversal":1.2},
+        "R_100":     {"bb_bounce":1.5, "rsi_reversal":1.4, "ema_triple":0.4, "donchian_breakout":1.3},
+        "1HZ100V":   {"bb_bounce":1.5, "rsi_reversal":1.4, "ema_triple":0.4, "donchian_breakout":1.3},
+        "1HZ75V":    {"bb_bounce":1.4, "rsi_reversal":1.3, "donchian_breakout":1.2},
+        "1HZ50V":    {"bb_bounce":1.4, "rsi_reversal":1.3, "donchian_breakout":1.2},
+        "JD100":     {"bb_bounce":1.4, "rsi_reversal":1.3, "donchian_breakout":1.2},
+        "R_75":      {"bb_bounce":1.3, "rsi_reversal":1.3, "momentum_streak":1.2, "donchian_breakout":1.2},
+        "R_50":      {"bb_bounce":1.4, "rsi_reversal":1.2, "donchian_breakout":1.1},
         "frxEURUSD": {"pivot_stochrsi":1.6, "fvg_retest":1.4},
         "frxGBPUSD": {"pivot_stochrsi":1.6, "fvg_retest":1.4},
         "frxUSDJPY": {"pivot_stochrsi":1.5, "fvg_retest":1.3},
