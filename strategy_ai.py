@@ -329,8 +329,36 @@ class StrategyTracker:
     def _load(self) -> dict:
         try:
             with open(self.FILE) as f:
-                return json.load(f)
-        except:
+                data = json.load(f)
+
+            # ── Auto-migration: add any new strategies missing from file ──
+            migrated = False
+            for s in STRATEGIES:
+                if s not in data.get("strategies", {}):
+                    data.setdefault("strategies", {})[s] = {"wins": 0, "losses": 0}
+                    migrated = True
+                    log.info(f"[AI] Migrated: added new strategy '{s}' to performance file")
+
+            # Remove strategies no longer in use
+            stale = [s for s in list(data.get("strategies", {}).keys())
+                     if s not in STRATEGIES]
+            for s in stale:
+                del data["strategies"][s]
+                migrated = True
+                log.info(f"[AI] Migrated: removed stale strategy '{s}'")
+
+            if migrated:
+                # Reset optimizer state since strategy list changed
+                data["optimizer_state"] = None
+                log.info("[AI] Strategy list changed — optimizer state reset, "
+                         "will reinitialize from priors")
+                with open(self.FILE, "w") as f:
+                    json.dump(data, f, indent=2)
+
+            return data
+
+        except FileNotFoundError:
+            log.info("[AI] No performance file found — starting fresh")
             return {
                 "strategies": {s: {"wins":0,"losses":0} for s in STRATEGIES},
                 "markets":    {},
