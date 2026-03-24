@@ -1,291 +1,325 @@
 """
-User Manager — handles registration, authentication,
-subscription status and per-user bot instances.
+User-facing routes — add these to server.py
+Handles registration, login, user dashboard, bot control and payments.
 """
-import json
-import os
-import hashlib
-import secrets
+from flask import (Blueprint, render_template, request, jsonify,
+                   redirect, url_for, session)
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+import json
+
+import user_manager as um
+import bot_manager  as bm
+import payments
 
 log = logging.getLogger(__name__)
-
-USERS_FILE = "users.json"
-TRIAL_DAYS = 7
-SUB_PRICE  = 79.00  # USD
+user_bp = Blueprint("user", __name__, url_prefix="/user")
 
 
-def _hash_password(password: str, salt: str) -> str:
-    return hashlib.pbkdf2_hmac(
-        "sha256", password.encode(), salt.encode(), 100_000
-    ).hex()
+def user_login_required(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("user_logged_in"):
+            return redirect(url_for("user.login"))
+        return f(*args, **kwargs)
+    return decorated
 
 
-def _load() -> dict:
+# ── Auth ──────────────────────────────────────────────────────
+
+@user_bp.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+        confirm  = request.form.get("confirm",  "").strip()
+        email    = request.form.get("email",    "").strip()
+
+        if password != confirm:
+            return render_template("register.html",
+                                   error="Passwords do not match")
+
+        result = um.register_user(username, password, email)
+        if result["ok"]:
+            session["user_logged_in"] = True
+            session["username"]       = username
+            log.info(f"[USER] Registered and logged in: {username}")
+            return redirect(url_for("user.dashboard"))
+        else:
+            return render_template("register.html", error=result["error"])
+
+    return render_template("register.html")
+
+
+@user_bp.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+        user     = um.authenticate(username, password)
+        if user:
+            session["user_logged_in"] = True
+            session["username"]       = user["username"]
+            log.info(f"[USER] Login: {username}")
+            return redirect(url_for("user.dashboard"))
+        else:
+            return render_template("user_login.html",
+                                   error="Invalid username or password")
+
+    return render_template("user_login.html")
+
+
+@user_bp.route("/logout")
+def logout():
+    username = session.get("username")
+    session.clear()
+    log.info(f"[USER] Logout: {username}")
+    return redirect(url_for("user.login"))
+
+
+# ── Dashboard ─────────────────────────────────────────────────
+
+@user_bp.route("/")
+@user_login_required
+def dashboard():
+    return render_template("user_dashboard.html")
+
+
+# ── Status ────────────────────────────────────────────────────
+
+@user_bp.route("/status")
+@user_login_required
+def status():
+    username = session["username"]
+    user     = um.get_user(username)
+    sub      = um.get_subscription_status(username)
+    state    = bm.get_user_state(username)
+
+    # News events
+    news = []
     try:
-        with open(USERS_FILE) as f:
-            return json.load(f)
-    except:
-        return {"users": {}}
-
-
-def _save(data: dict):
-    with open(USERS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-# ── Registration ──────────────────────────────────────────────
-
-def register_user(username: str, password: str,
-                  email: str = "") -> dict:
-    data = _load()
-    username = username.strip().lower()
-
-    if not username or len(username) < 3:
-        return {"ok": False, "error": "Username must be at least 3 characters"}
-    if not password or len(password) < 6:
-        return {"ok": False, "error": "Password must be at least 6 characters"}
-    if username in data["users"]:
-        return {"ok": False, "error": "Username already taken"}
-
-    # Check email uniqueness if provided
-    if email:
-        for u in data["users"].values():
-            if u.get("email", "").lower() == email.lower():
-                return {"ok": False, "error": "Email already registered"}
-
-    salt  = secrets.token_hex(16)
-    now   = datetime.now(timezone.utc)
-    trial_end = now + timedelta(days=TRIAL_DAYS)
-
-    data["users"][username] = {
-        "username":        username,
-        "email":           email.strip().lower(),
-        "password_hash":   _hash_password(password, salt),
-        "salt":            salt,
-        "role":            "user",
-        "created_at":      now.isoformat(),
-        "trial_ends":      trial_end.isoformat(),
-        "subscription_end": None,
-        "active":          True,
-        "suspended":       False,
-        # Bot settings
-        "demo_token":      "",
-        "live_token":      "",
-        "mode":            "demo",
-        "risk_pct":        1,
-        "bot_running":     False,
-        "account_type":    "paid",   # paid | free
-        # Stats
-        "total_trades":    0,
-        "total_wins":      0,
-        "total_losses":    0,
-        "net_pnl":         0.0,
-    }
-
-    _save(data)
-    log.info(f"[USERS] Registered: {username} (trial until {trial_end.date()})")
-    return {"ok": True, "username": username, "trial_ends": trial_end.isoformat()}
-
-
-# ── Authentication ────────────────────────────────────────────
-
-def authenticate(username: str, password: str) -> Optional[dict]:
-    data  = _load()
-    uname = username.strip().lower()
-    user  = data["users"].get(uname)
-    if not user:
-        return None
-    if user.get("suspended"):
-        return None
-    expected = _hash_password(password, user["salt"])
-    if expected != user["password_hash"]:
-        return None
-    return user
-
-
-# ── Subscription status ───────────────────────────────────────
-
-def get_subscription_status(username: str) -> dict:
-    data = _load()
-    user = data["users"].get(username.lower())
-    if not user:
-        return {"status": "not_found"}
-
-    if user.get("suspended"):
-        return {"status": "suspended"}
-
-    now = datetime.now(timezone.utc)
-
-    # Check active subscription first
-    sub_end = user.get("subscription_end")
-    if sub_end:
-        sub_dt = datetime.fromisoformat(sub_end)
-        if sub_dt > now:
-            days_left = (sub_dt - now).days
-            return {
-                "status":    "active",
-                "days_left": days_left,
-                "ends":      sub_end,
-                "plan":      "monthly",
-            }
-
-    # Check trial
-    trial_end = user.get("trial_ends")
-    if trial_end:
-        trial_dt = datetime.fromisoformat(trial_end)
-        if trial_dt > now:
-            days_left = (trial_dt - now).days
-            hours_left = int((trial_dt - now).total_seconds() / 3600)
-            return {
-                "status":     "trial",
-                "days_left":  days_left,
-                "hours_left": hours_left,
-                "ends":       trial_end,
-            }
-
-    # Expired
-    return {
-        "status":   "expired",
-        "days_left": 0,
-        "price":    SUB_PRICE,
-    }
-
-
-def is_allowed_to_trade(username: str) -> bool:
-    status = get_subscription_status(username)
-    return status["status"] in ("active", "trial")
-
-
-# ── User settings ─────────────────────────────────────────────
-
-def update_user_settings(username: str, **kwargs) -> dict:
-    data  = _load()
-    uname = username.lower()
-    user  = data["users"].get(uname)
-    if not user:
-        return {"ok": False, "error": "User not found"}
-
-    allowed = {
-        "demo_token", "live_token", "mode",
-        "risk_pct", "email", "bot_running",
-        "total_trades", "total_wins",
-        "total_losses", "net_pnl",
-        "account_type",
-    }
-    for k, v in kwargs.items():
-        if k in allowed:
-            user[k] = v
-
-    _save(data)
-    return {"ok": True}
-
-
-def get_user(username: str) -> Optional[dict]:
-    data = _load()
-    return data["users"].get(username.lower())
-
-
-def get_all_users() -> list:
-    data = _load()
-    users = []
-    for u in data["users"].values():
-        status = get_subscription_status(u["username"])
-        users.append({**u, "sub_status": status})
-    return users
-
-
-# ── Admin controls ────────────────────────────────────────────
-
-def admin_extend_subscription(username: str, days: int = 30) -> dict:
-    data  = _load()
-    uname = username.lower()
-    user  = data["users"].get(uname)
-    if not user:
-        return {"ok": False, "error": "User not found"}
-
-    now     = datetime.now(timezone.utc)
-    current = user.get("subscription_end")
-
-    if current:
-        base = max(datetime.fromisoformat(current), now)
-    else:
-        base = now
-
-    new_end = base + timedelta(days=days)
-    user["subscription_end"] = new_end.isoformat()
-    _save(data)
-    log.info(f"[USERS] Extended {username} subscription to {new_end.date()}")
-    return {"ok": True, "new_end": new_end.isoformat()}
-
-
-def admin_suspend_user(username: str, suspend: bool = True) -> dict:
-    data  = _load()
-    uname = username.lower()
-    user  = data["users"].get(uname)
-    if not user:
-        return {"ok": False, "error": "User not found"}
-    user["suspended"] = suspend
-    _save(data)
-    return {"ok": True}
-
-
-def admin_set_role(username: str, role: str) -> dict:
-    data  = _load()
-    uname = username.lower()
-    user  = data["users"].get(uname)
-    if not user:
-        return {"ok": False, "error": "User not found"}
-    user["role"] = role
-    _save(data)
-    return {"ok": True}
-
-
-def change_password(username: str, current_password: str,
-                    new_password: str) -> dict:
-    """Allow a user to change their own password."""
-    data  = _load()
-    uname = username.lower()
-    user  = data["users"].get(uname)
-    if not user:
-        return {"ok": False, "error": "User not found"}
-
-    # Verify current password
-    expected = _hash_password(current_password, user["salt"])
-    if expected != user["password_hash"]:
-        return {"ok": False, "error": "Current password is incorrect"}
-
-    if len(new_password) < 6:
-        return {"ok": False, "error": "Password must be at least 6 characters"}
-
-    # Set new password
-    new_salt = secrets.token_hex(16)
-    user["salt"]          = new_salt
-    user["password_hash"] = _hash_password(new_password, new_salt)
-    _save(data)
-    log.info(f"[USERS] Password changed for {username}")
-    return {"ok": True}
-
-
-def delete_user(username: str) -> dict:
-    """Permanently delete a user account."""
-    import os
-    data  = _load()
-    uname = username.lower()
-    if uname not in data["users"]:
-        return {"ok": False, "error": "User not found"}
-
-    del data["users"][uname]
-    _save(data)
-
-    # Remove their trade history file
-    trade_file = f"trades_{uname}.json"
-    try:
-        if os.path.exists(trade_file):
-            os.remove(trade_file)
+        from server import _get_upcoming_news
+        news = _get_upcoming_news()
     except: pass
 
-    log.info(f"[USERS] Deleted account: {username}")
-    return {"ok": True}
+    risk = None
+    if state.get("risk"):
+        risk = state["risk"]
+    elif user:
+        risk = {
+            "balance":       "—",
+            "total_trades":  user.get("total_trades", 0),
+            "wins":          user.get("total_wins",   0),
+            "losses":        user.get("total_losses", 0),
+            "win_rate":      round(user["total_wins"] / user["total_trades"] * 100, 1)
+                             if user.get("total_trades", 0) > 0 else 0,
+            "net_pnl":       user.get("net_pnl", 0),
+            "consec_losses": 0,
+            "daily_profit":  0,
+            "daily_loss":    0,
+        }
+
+    return jsonify({
+        "username":     username,
+        "bot_running":  bm.is_running(username),
+        "mode":         user.get("mode", "demo") if user else "demo",
+        "risk_pct":     user.get("risk_pct", 1)  if user else 1,
+        "risk":         risk,
+        "subscription": sub,
+        "last_signals": bm.get_last_signals(username),
+        "news_events":  news,
+    })
+
+
+# ── Bot controls ──────────────────────────────────────────────
+
+@user_bp.route("/start", methods=["POST"])
+@user_login_required
+def start_bot():
+    username = session["username"]
+
+    if not um.is_allowed_to_trade(username):
+        return jsonify({"ok": False,
+                        "error": "Subscription expired. Please renew."})
+
+    user = um.get_user(username)
+    if not user:
+        return jsonify({"ok": False, "error": "User not found"})
+
+    mode  = user.get("mode", "demo")
+    token = user.get("demo_token") if mode == "demo" \
+            else user.get("live_token")
+
+    if not token:
+        return jsonify({"ok": False,
+                        "error": f"No {mode} API token set. Add your token first."})
+
+    result = bm.start_user_bot(username, user)
+    return jsonify(result)
+
+
+@user_bp.route("/stop", methods=["POST"])
+@user_login_required
+def stop_bot():
+    username = session["username"]
+    result   = bm.stop_user_bot(username)
+    return jsonify(result)
+
+
+@user_bp.route("/set-mode/<mode>")
+@user_login_required
+def set_mode(mode):
+    if mode not in ("demo", "live"):
+        return jsonify({"error": "Invalid mode"}), 400
+    username = session["username"]
+    bm.stop_user_bot(username)
+    um.update_user_settings(username, mode=mode)
+    return jsonify({"ok": True, "mode": mode})
+
+
+@user_bp.route("/set-risk/<int:pct>")
+@user_login_required
+def set_risk(pct):
+    if pct not in (1, 2, 3):
+        return jsonify({"error": "Risk must be 1, 2 or 3"}), 400
+    username = session["username"]
+    um.update_user_settings(username, risk_pct=pct)
+    return jsonify({"ok": True, "risk_pct": pct})
+
+
+@user_bp.route("/save-tokens", methods=["POST"])
+@user_login_required
+def save_tokens():
+    username   = session["username"]
+    data       = request.get_json() or {}
+    demo_token = data.get("demo_token", "").strip()
+    live_token = data.get("live_token", "").strip()
+
+    updates = {}
+    if demo_token: updates["demo_token"] = demo_token
+    if live_token: updates["live_token"] = live_token
+
+    if not updates:
+        return jsonify({"ok": False, "error": "No tokens provided"})
+
+    result = um.update_user_settings(username, **updates)
+    log.info(f"[USER] {username} updated tokens")
+    return jsonify(result)
+
+
+@user_bp.route("/change-password", methods=["POST"])
+@user_login_required
+def change_password():
+    username = session["username"]
+    data     = request.get_json() or {}
+    current  = data.get("current", "").strip()
+    new_pw   = data.get("new_password", "").strip()
+    result   = um.change_password(username, current, new_pw)
+    if result["ok"]:
+        log.info(f"[USER] {username} changed password")
+    return jsonify(result)
+
+
+
+@user_bp.route("/close-all", methods=["POST"])
+@user_login_required
+def close_all():
+    """Emergency close all open positions for this user."""
+    username = session["username"]
+    try:
+        import scalp_bot as sb
+        result = sb.close_all()
+        log.info(f"[USER] {username} closed all positions")
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+# ── Trades ────────────────────────────────────────────────────
+
+@user_bp.route("/trades")
+@user_login_required
+def trades():
+    username = session["username"]
+    t        = bm.get_user_trades(username)
+    return jsonify({"trades": t})
+
+
+# ── Payments ──────────────────────────────────────────────────
+
+@user_bp.route("/create-payment", methods=["POST"])
+@user_login_required
+def create_payment():
+    username    = session["username"]
+    base_url    = request.host_url.rstrip("/")
+    success_url = base_url + "/user/?payment=success"
+    cancel_url  = base_url + "/user/?payment=cancelled"
+
+    result = payments.create_payment(username, success_url, cancel_url)
+    return jsonify(result)
+
+
+# ── NOWPayments webhook (no auth required) ────────────────────
+
+
+
+# ── AJAX endpoints for SPA (index.html) ──────────────────────
+
+@user_bp.route("/login-ajax", methods=["POST"])
+def login_ajax():
+    data     = request.get_json() or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    user     = um.authenticate(username, password)
+    if user:
+        session["user_logged_in"] = True
+        session["username"]       = user["username"]
+        return jsonify({"ok": True, "username": user["username"]})
+    return jsonify({"ok": False, "error": "Invalid username or password"})
+
+
+@user_bp.route("/register-ajax", methods=["POST"])
+def register_ajax():
+    data     = request.get_json() or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    email    = data.get("email",    "").strip()
+    result   = um.register_user(username, password, email)
+    if result["ok"]:
+        session["user_logged_in"] = True
+        session["username"]       = username
+        return jsonify({"ok": True, "username": username})
+    return jsonify(result)
+
+
+@user_bp.route("/logout-ajax", methods=["POST"])
+def logout_ajax():
+    username = session.get("username")
+    if username:
+        bm.stop_user_bot(username)
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@user_bp.route("/whoami")
+def whoami():
+    if session.get("user_logged_in"):
+        return jsonify({"username": session.get("username")})
+    return jsonify({"username": None})
+
+def register_webhook(app):
+    @app.route("/webhook/nowpayments", methods=["POST"])
+    def nowpayments_webhook():
+        payload_bytes = request.get_data()
+        sig           = request.headers.get("x-nowpayments-sig", "")
+
+        if not payments.verify_webhook(payload_bytes, sig):
+            log.warning("[WEBHOOK] Invalid signature")
+            return jsonify({"error": "Invalid signature"}), 400
+
+        try:
+            payload = request.get_json(force=True)
+        except:
+            return jsonify({"error": "Bad JSON"}), 400
+
+        result = payments.handle_webhook(payload)
+        return jsonify(result)
