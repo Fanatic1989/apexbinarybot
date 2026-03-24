@@ -629,6 +629,31 @@ def _run_bot_safe():
 # ─────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────
+
+# ─────────────────────────────────────────
+# Self-ping — keeps Render free tier alive
+# Pings own health endpoint every 4 minutes
+# ─────────────────────────────────────────
+def _self_ping_loop():
+    import requests, time
+    time.sleep(60)  # Wait 1 min after startup
+    app_url = os.getenv("APP_URL", "").rstrip("/")
+    if not app_url:
+        log.info("[PING] APP_URL not set — self-ping disabled")
+        return
+    log.info(f"[PING] Self-ping active → {app_url}/health every 4min")
+    while True:
+        try:
+            r = requests.get(f"{app_url}/health", timeout=10)
+            log.debug(f"[PING] ✓ {r.status_code}")
+        except Exception as e:
+            log.debug(f"[PING] Failed: {e}")
+        time.sleep(240)  # 4 minutes
+
+_ping_thread = threading.Thread(target=_self_ping_loop,
+                                 daemon=True, name="SelfPing")
+_ping_thread.start()
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
     log.info(f"[SERVER] Starting Flask on port {port}")
