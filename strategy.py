@@ -1,10 +1,15 @@
 """
-Multi-Regime Strategy Engine v4.1
+Strategy Engine v4.2 — Three key improvements:
 
-Changes from v4.0:
-  - Tier 3 BB threshold lowered 0.92 → 0.88 (catches more near-extreme signals)
-  - ADX > 35 accepted as alternative to engulfing candle for Tier 3
-  - regime passed through signal dict so Thompson Sampling gets regime context
+1. ATR Dead Market Filter — skip markets where volatility is too low
+   (flat/dead markets have random moves with no edge)
+
+2. Consecutive Outside-Band Detection — when price has been outside
+   the band for 3+ candles it's a breakout NOT a reversal. Follow it
+   instead of fading it.
+
+3. 5-Minute Candle Confirmation — for trending strategies, confirm
+   entry direction on the 5-minute chart to filter false 1-min signals.
 """
 import logging
 import time
@@ -18,9 +23,12 @@ from strategy_ai import tracker, selector
 
 log = logging.getLogger(__name__)
 
-# ── HTF cache ─────────────────────────────
+# ── HTF & 5M candle caches ────────────────────────────────────
 _htf_cache = {}
+_m5_cache  = {}
 _HTF_TTL   = 1800
+_M5_TTL    = 300   # 5-minute candles cached 5 mins
+
 
 def _get_htf_trend(market):
     now = time.time()
@@ -40,14 +48,172 @@ def _get_htf_trend(market):
     _htf_cache[market] = ([], now - _HTF_TTL + 300)
     return 0
 
+
 def _htf_from_candles(candles):
     try:
-        df  = _to_df(candles)
-        e200= _ema(df["close"], 200).iloc[-1]
-        last= df["close"].iloc[-1]
-        return 1 if float(last) > float(e200)*1.0002 else -1 if float(last) < float(e200)*0.9998 else 0
+        df   = _to_df(candles)
+        e200 = _ema(df["close"], 200).iloc[-1]
+        last = df["close"].iloc[-1]
+        return 1 if float(last) > float(e200)*1.0002 else \
+              -1 if float(last) < float(e200)*0.9998 else 0
     except:
         return 0
+
+
+def _get_m5_trend(market) -> int:
+    """
+    Fetch 5-minute candles and return short-term bias.
+    Returns: 1=bullish, -1=bearish, 0=neutral
+    Cached for 5 minutes. Falls back to neutral on any error.
+    """
+    now = time.time()
+    if market in _m5_cache:
+        candles, ts = _m5_cache[market]
+        if now - ts < _M5_TTL:
+            return _m5_from_candles(candles)
+    try:
+        from deriv_api import get_htf_candles
+        # Use HTF candle fetcher with 5-minute granularity (300s)
+        candles = get_htf_candles(market, granularity=300, count=40, retries=1)
+    except Exception:
+        try:
+            # Fallback: try generic get_candles with granularity
+            from deriv_api import get_candles as _gc
+            import inspect
+            sig = inspect.signature(_gc)
+            if "granularity" in sig.parameters:
+                candles = _gc(market, granularity=300, count=40)
+            else:
+                return 0  # Can't fetch M5, return neutral
+        except Exception as e:
+            log.debug(f"[M5] {market}: {e}")
+            return 0
+    if candles and len(candles) >= 20:
+        _m5_cache[market] = (candles, now)
+        return _m5_from_candles(candles)
+    _m5_cache[market] = ([], now - _M5_TTL + 60)
+    return 0
+
+
+def _m5_from_candles(candles) -> int:
+    """20 EMA direction on 5-min chart."""
+    try:
+        df  = _to_df(candles)
+        e20 = _ema(df["close"], 20)
+        # Bullish: price above 20EMA and EMA rising
+        last_close = float(df["close"].iloc[-1])
+        e20_now    = float(e20.iloc[-1])
+        e20_prev   = float(e20.iloc[-2])
+        if last_close > e20_now and e20_now > e20_prev:
+            return 1
+        if last_close < e20_now and e20_now < e20_prev:
+            return -1
+        return 0
+    except:
+        return 0
+
+
+# ─────────────────────────────────────────
+# NEW FILTER FUNCTIONS
+# ─────────────────────────────────────────
+
+def _atr_too_low(df) -> bool:
+    """
+    Dead market filter — skip when ATR is below 20% of its 50-period average.
+    Dead markets have no momentum and produce random results.
+    """
+    try:
+        atr     = _atr(df)
+        atr_now = float(atr.iloc[-1])
+        atr_avg = float(atr.tail(50).mean())
+        if atr_avg == 0:
+            return False
+        ratio = atr_now / atr_avg
+        if ratio < 0.20:
+            log.debug(f"[FILTER] Dead market — ATR ratio {ratio:.2f}")
+            return True
+        return False
+    except:
+        return False
+
+
+def _consecutive_outside_band(df, upper, lower, direction: str) -> bool:
+    """
+    Breakout detection — if price has been OUTSIDE the band for 3+
+    consecutive candles it's a sustained breakout, NOT a reversal.
+
+    Returns True if we should FOLLOW the breakout (flip signal direction)
+    rather than fade it.
+
+    direction: 'PUT' means we were going to fade upper band,
+               'CALL' means we were going to fade lower band.
+    """
+    try:
+        closes = df["close"].values
+        uppers = upper.values
+        lowers = lower.values
+
+        if direction == "PUT":
+            # Check how many candles above upper band
+            count = 0
+            for i in range(-1, -6, -1):
+                if float(closes[i]) > float(uppers[i]):
+                    count += 1
+                else:
+                    break
+            if count >= 3:
+                log.debug(f"[FILTER] Sustained breakout UP {count} candles — follow, don't fade")
+                return True
+
+        elif direction == "CALL":
+            # Check how many candles below lower band
+            count = 0
+            for i in range(-1, -6, -1):
+                if float(closes[i]) < float(lowers[i]):
+                    count += 1
+                else:
+                    break
+            if count >= 3:
+                log.debug(f"[FILTER] Sustained breakout DOWN {count} candles — follow, don't fade")
+                return True
+
+        return False
+    except:
+        return False
+
+
+def _donchian_breakout(df, direction: str) -> bool:
+    """
+    Volatility breakout — price breaking Donchian channel (20-period)
+    after ATR compression. Returns True if valid breakout entry.
+    """
+    try:
+        high   = df["high"]
+        low    = df["low"]
+        atr    = _atr(df)
+
+        # 20-period Donchian
+        don_high = high.tail(21).iloc[:-1].max()
+        don_low  = low.tail(21).iloc[:-1].min()
+
+        last_high  = float(high.iloc[-1])
+        last_low   = float(low.iloc[-1])
+        atr_now    = float(atr.iloc[-1])
+        atr_avg    = float(atr.tail(20).mean())
+
+        # ATR must have been compressed (below avg) before the breakout
+        atr_prev_avg = float(atr.tail(10).iloc[:-1].mean())
+        was_compressed = atr_prev_avg < atr_avg * 0.85
+
+        if direction == "CALL" and last_high > don_high and was_compressed:
+            log.debug(f"[DONCHIAN] Breakout UP after compression")
+            return True
+        if direction == "PUT" and last_low < don_low and was_compressed:
+            log.debug(f"[DONCHIAN] Breakout DOWN after compression")
+            return True
+        return False
+    except:
+        return False
 
 
 # ─────────────────────────────────────────
@@ -64,6 +230,11 @@ def analyze_market(candles: list, market: str) -> dict:
     if len(df) < 50:
         return None
 
+    # ── NEW: Dead market filter ───────────────────────────────
+    if _atr_too_low(df):
+        log.debug(f"[STRATEGY] {market} dead market — skipping")
+        return _no_signal(market)
+
     regime = _detect_regime(df, market)
     if regime == "choppy":
         log.info(f"[REGIME] {market} CHOPPY — no trade")
@@ -78,7 +249,6 @@ def analyze_market(candles: list, market: str) -> dict:
     else:
         result = _synthetic_strategy(df, candles, market, regime)
 
-    # Pass regime through so bot.py can record it for Thompson Sampling
     if result:
         result["regime"] = regime
     return result
@@ -89,23 +259,19 @@ def analyze_market(candles: list, market: str) -> dict:
 # ─────────────────────────────────────────
 def _detect_regime(df, market) -> str:
     try:
-        adx_val = _adx(df)
-        atr_val = float(_atr(df).iloc[-1])
-        atr_avg = float(_atr(df).rolling(20).mean().iloc[-1])
+        adx_val   = _adx(df)
+        atr_val   = float(_atr(df).iloc[-1])
+        atr_avg   = float(_atr(df).rolling(20).mean().iloc[-1])
         atr_spike = atr_val > atr_avg * 2.0
 
         if atr_spike:
             log.debug(f"[REGIME] {market} ATR spike {atr_val:.4f} vs avg {atr_avg:.4f}")
-            try:
-                tracker.record_volatility_spike(market)
-            except:
-                pass
+            try: tracker.record_volatility_spike(market)
+            except: pass
             return "choppy"
 
-        if adx_val > 25:
-            return "trending"
-        if adx_val < 20:
-            return "ranging"
+        if adx_val > 25: return "trending"
+        if adx_val < 20: return "ranging"
         return "choppy"
 
     except Exception as e:
@@ -135,11 +301,11 @@ def _synthetic_strategy(df, candles, market, regime):
     prev_upper = float(upper.iloc[-2])
     prev_lower = float(lower.iloc[-2])
 
-    bb_range   = last_upper - last_lower
-    bb_pct     = (last_close - last_lower) / bb_range if bb_range > 0 else 0.5
-    adx_val    = _adx(df)
-    last_bull  = last_close > last_open
-    last_bear  = last_close < last_open
+    bb_range = last_upper - last_lower
+    bb_pct   = (last_close - last_lower) / bb_range if bb_range > 0 else 0.5
+    adx_val  = _adx(df)
+    last_bull = last_close > last_open
+    last_bear = last_close < last_open
     engulfing  = abs(last_close-last_open) > abs(prev_close-prev_open) * 0.8
     strong_dir = (last_bull and last_close > prev_close) or \
                  (last_bear and last_close < prev_close)
@@ -148,11 +314,8 @@ def _synthetic_strategy(df, candles, market, regime):
     e21 = float(_ema(close, 21).iloc[-1])
     e50 = float(_ema(close, 50).iloc[-1])
     short_trend = 1 if e9 > e21 else -1
-    mid_trend   = 1 if e21 > e50 else -1
 
     if regime == "trending":
-        # Outside band = mean reversion = allow against short trend
-        # Inside band = momentum = must follow trend
         at_upper_extreme = bb_pct >= 0.88
         at_lower_extreme = bb_pct <= 0.12
         put_allowed  = short_trend == -1 or at_upper_extreme
@@ -168,11 +331,23 @@ def _synthetic_strategy(df, candles, market, regime):
 
     # ── TIER 1: Price outside band ────────────────────────────
     if bb_pct > 1.0 and put_allowed:
+        # NEW: Check if it's a sustained breakout — follow instead of fade
+        if _consecutive_outside_band(df, upper, lower, "PUT"):
+            if call_allowed:
+                log.info(f"[SYNTH] {market} CALL | Sustained breakout UP — following")
+                return _build(market, "CALL", "high", candles, "false_breakout")
+            return _no_signal(market)
         conf = "high" if bb_pct > 1.05 else "normal"
         log.info(f"[SYNTH] {market} PUT | Above upper band {bb_pct:.2f}")
         return _build(market, "PUT", conf, candles, "bb_bounce")
 
     if bb_pct < 0.0 and call_allowed:
+        # NEW: Check if it's a sustained breakout — follow instead of fade
+        if _consecutive_outside_band(df, upper, lower, "CALL"):
+            if put_allowed:
+                log.info(f"[SYNTH] {market} PUT | Sustained breakout DOWN — following")
+                return _build(market, "PUT", "high", candles, "false_breakout")
+            return _no_signal(market)
         conf = "high" if bb_pct < -0.05 else "normal"
         log.info(f"[SYNTH] {market} CALL | Below lower band {bb_pct:.2f}")
         return _build(market, "CALL", conf, candles, "bb_bounce")
@@ -187,8 +362,6 @@ def _synthetic_strategy(df, candles, market, regime):
         return _build(market, "CALL", "high", candles, "bb_bounce")
 
     # ── TIER 3: Near extremes with confirmation ───────────────
-    # Lowered threshold 0.92 → 0.88 so bb%=0.90/0.92 qualifies
-    # ADX > 35 accepted as alternative to engulfing (strong trend = confirmation)
     tier3_confirm = engulfing or strong_dir or adx_val > 30
 
     if bb_pct > 0.82 and tier3_confirm and last_bear and put_allowed:
@@ -198,6 +371,16 @@ def _synthetic_strategy(df, candles, market, regime):
     if bb_pct < 0.18 and tier3_confirm and last_bull and call_allowed:
         log.info(f"[SYNTH] {market} CALL | Near lower {bb_pct:.2f} ADX={adx_val:.1f}")
         return _build(market, "CALL", "normal", candles, "bb_bounce")
+
+    # ── NEW TIER 4: Donchian volatility breakout ──────────────
+    # Only in trending regime with ADX > 30 — momentum breakout
+    if regime == "trending" and adx_val > 30:
+        if _donchian_breakout(df, "CALL") and call_allowed:
+            log.info(f"[SYNTH] {market} CALL | Donchian breakout high ADX={adx_val:.1f}")
+            return _build(market, "CALL", "high", candles, "false_breakout")
+        if _donchian_breakout(df, "PUT") and put_allowed:
+            log.info(f"[SYNTH] {market} PUT | Donchian breakout low ADX={adx_val:.1f}")
+            return _build(market, "PUT", "high", candles, "false_breakout")
 
     # ── Regime-specific strategies ────────────────────────────
     if regime == "trending":
@@ -209,21 +392,31 @@ def _synthetic_strategy(df, candles, market, regime):
 
 
 def _synth_trending(df, candles, market, adx_val):
-    close  = df["close"]
-    rsi    = float(_rsi(close).iloc[-1])
-    e9     = float(_ema(close, 9).iloc[-1])
-    e21    = float(_ema(close, 21).iloc[-1])
+    close = df["close"]
+    rsi   = float(_rsi(close).iloc[-1])
+    e9    = float(_ema(close, 9).iloc[-1])
+    e21   = float(_ema(close, 21).iloc[-1])
 
     def bull(i): return float(df.iloc[i]["close"]) > float(df.iloc[i]["open"])
     def bear(i): return float(df.iloc[i]["close"]) < float(df.iloc[i]["open"])
 
+    # NEW: 5-minute chart confirmation for momentum signals
+    m5 = _get_m5_trend(market)
+
     if bull(-1) and bull(-2) and bull(-3) and e9 > e21 and 42 <= rsi <= 75:
-        log.info(f"[SYNTH] {market} CALL | Trending momentum RSI {rsi:.1f}")
-        return _build(market, "CALL", "normal", candles, "momentum_streak")
+        # Confirm with 5M — neutral (0) is OK, bearish (-1) blocks
+        if m5 >= 0:
+            log.info(f"[SYNTH] {market} CALL | Trending momentum RSI {rsi:.1f} M5={'bull' if m5==1 else 'neut'}")
+            return _build(market, "CALL", "normal", candles, "momentum_streak")
+        else:
+            log.debug(f"[SYNTH] {market} CALL momentum blocked by M5 bearish")
 
     if bear(-1) and bear(-2) and bear(-3) and e9 < e21 and 25 <= rsi <= 58:
-        log.info(f"[SYNTH] {market} PUT | Trending momentum RSI {rsi:.1f}")
-        return _build(market, "PUT", "normal", candles, "momentum_streak")
+        if m5 <= 0:
+            log.info(f"[SYNTH] {market} PUT | Trending momentum RSI {rsi:.1f} M5={'bear' if m5==-1 else 'neut'}")
+            return _build(market, "PUT", "normal", candles, "momentum_streak")
+        else:
+            log.debug(f"[SYNTH] {market} PUT momentum blocked by M5 bullish")
 
     recent_high = float(df["high"].tail(10).iloc[:-1].max())
     recent_low  = float(df["low"].tail(10).iloc[:-1].min())
@@ -231,21 +424,22 @@ def _synth_trending(df, candles, market, adx_val):
     last_low    = float(df["low"].iloc[-1])
 
     if last_high > recent_high and e9 > e21 and rsi > 50:
-        log.info(f"[SYNTH] {market} CALL | Micro-breakout high")
-        return _build(market, "CALL", "high", candles, "false_breakout")
+        if m5 >= 0:
+            log.info(f"[SYNTH] {market} CALL | Micro-breakout high")
+            return _build(market, "CALL", "high", candles, "false_breakout")
 
     if last_low < recent_low and e9 < e21 and rsi < 50:
-        log.info(f"[SYNTH] {market} PUT | Micro-breakout low")
-        return _build(market, "PUT", "high", candles, "false_breakout")
+        if m5 <= 0:
+            log.info(f"[SYNTH] {market} PUT | Micro-breakout low")
+            return _build(market, "PUT", "high", candles, "false_breakout")
 
     return _no_signal(market)
 
 
 def _synth_ranging(df, candles, market, adx_val):
-    close   = df["close"]
-    rsi_val = float(_rsi(close).iloc[-1])
-    stoch   = _stoch_rsi(close)
-
+    close        = df["close"]
+    rsi_val      = float(_rsi(close).iloc[-1])
+    stoch        = _stoch_rsi(close)
     rsi_series   = _rsi(close)
     rsi_prev     = float(rsi_series.iloc[-2])
     rsi_prev2    = float(rsi_series.iloc[-3])
@@ -285,49 +479,53 @@ def _forex_trending(df, candles, market):
     if htf == 0:
         return _no_signal(market)
 
-    e200      = float(_ema(close, 200).iloc[-1])
+    # NEW: 5-minute confirmation for forex trend entries
+    m5 = _get_m5_trend(market)
+
+    e200       = float(_ema(close, 200).iloc[-1])
     last_close = float(close.iloc[-1])
-    stoch     = _stoch_rsi(close)
-    fvg       = _find_fvg(df)
-    ob        = _find_order_block(df, htf)
+    stoch      = _stoch_rsi(close)
+    fvg        = _find_fvg(df)
+    ob         = _find_order_block(df, htf)
 
     if htf == 1 and last_close > e200:
-        if fvg and fvg["type"] == "bullish":
-            in_fvg = float(fvg["low"]) <= last_close <= float(fvg["high"])
-            if in_fvg and stoch and stoch < 35:
-                log.info(f"[FOREX] {market} CALL | Bullish FVG retest StochRSI {stoch:.1f}")
-                return _build(market, "CALL", "high", candles, "fvg_retest")
-
-        if ob and ob["type"] == "bullish":
-            in_ob = float(ob["low"]) <= last_close <= float(ob["high"])
-            if in_ob and stoch and stoch < 40:
-                log.info(f"[FOREX] {market} CALL | Order Block retest")
-                return _build(market, "CALL", "high", candles, "fvg_retest")
+        # Require M5 not bearish for long entries
+        if m5 >= 0:
+            if fvg and fvg["type"] == "bullish":
+                in_fvg = float(fvg["low"]) <= last_close <= float(fvg["high"])
+                if in_fvg and stoch and stoch < 35:
+                    log.info(f"[FOREX] {market} CALL | Bullish FVG retest StochRSI {stoch:.1f} M5={'bull' if m5==1 else 'neut'}")
+                    return _build(market, "CALL", "high", candles, "fvg_retest")
+            if ob and ob["type"] == "bullish":
+                in_ob = float(ob["low"]) <= last_close <= float(ob["high"])
+                if in_ob and stoch and stoch < 40:
+                    log.info(f"[FOREX] {market} CALL | Order Block retest M5={'bull' if m5==1 else 'neut'}")
+                    return _build(market, "CALL", "high", candles, "fvg_retest")
 
     if htf == -1 and last_close < e200:
-        if fvg and fvg["type"] == "bearish":
-            in_fvg = float(fvg["low"]) <= last_close <= float(fvg["high"])
-            if in_fvg and stoch and stoch > 65:
-                log.info(f"[FOREX] {market} PUT | Bearish FVG retest StochRSI {stoch:.1f}")
-                return _build(market, "PUT", "high", candles, "fvg_retest")
-
-        if ob and ob["type"] == "bearish":
-            in_ob = float(ob["low"]) <= last_close <= float(ob["high"])
-            if in_ob and stoch and stoch > 60:
-                log.info(f"[FOREX] {market} PUT | Bearish Order Block retest")
-                return _build(market, "PUT", "high", candles, "fvg_retest")
+        if m5 <= 0:
+            if fvg and fvg["type"] == "bearish":
+                in_fvg = float(fvg["low"]) <= last_close <= float(fvg["high"])
+                if in_fvg and stoch and stoch > 65:
+                    log.info(f"[FOREX] {market} PUT | Bearish FVG retest StochRSI {stoch:.1f} M5={'bear' if m5==-1 else 'neut'}")
+                    return _build(market, "PUT", "high", candles, "fvg_retest")
+            if ob and ob["type"] == "bearish":
+                in_ob = float(ob["low"]) <= last_close <= float(ob["high"])
+                if in_ob and stoch and stoch > 60:
+                    log.info(f"[FOREX] {market} PUT | Bearish Order Block retest M5={'bear' if m5==-1 else 'neut'}")
+                    return _build(market, "PUT", "high", candles, "fvg_retest")
 
     return _no_signal(market)
 
 
 def _forex_ranging(df, candles, market):
-    close   = df["close"]
-    rsi_val = float(_rsi(close).iloc[-1])
-    rsi_prev= float(_rsi(close).iloc[-2])
-    stoch   = _stoch_rsi(close)
-    pivot   = _calc_pivot(df)
-    sr      = _find_sr_levels(df)
-    fib     = _find_fib_levels(df)
+    close      = df["close"]
+    rsi_val    = float(_rsi(close).iloc[-1])
+    rsi_prev   = float(_rsi(close).iloc[-2])
+    stoch      = _stoch_rsi(close)
+    pivot      = _calc_pivot(df)
+    sr         = _find_sr_levels(df)
+    fib        = _find_fib_levels(df)
 
     if not pivot:
         return _no_signal(market)
@@ -337,8 +535,8 @@ def _forex_ranging(df, candles, market):
 
     def count_support_confluences(price):
         conf = 0
-        if _near_level(price, s1):  conf += 1
-        if _near_level(price, pp):  conf += 1
+        if _near_level(price, s1): conf += 1
+        if _near_level(price, pp): conf += 1
         if sr.get("near_support") and _near_level(price, sr["near_support"]): conf += 1
         if fib.get("at_fib") and fib.get("nearest") and _near_level(price, fib["nearest"]): conf += 1
         return conf
@@ -396,13 +594,13 @@ def _commodity_trending(df, candles, market):
     e20   = _ema(close, 20)
     e200  = _ema(close, 200)
 
-    sma9_now  = float(sma9.iloc[-1])
-    sma9_prev = float(sma9.iloc[-2])
-    e20_now   = float(e20.iloc[-1])
-    e20_prev  = float(e20.iloc[-2])
-    e200_val  = float(e200.iloc[-1])
-    last_close= float(close.iloc[-1])
-    adx_val   = _adx(df)
+    sma9_now   = float(sma9.iloc[-1])
+    sma9_prev  = float(sma9.iloc[-2])
+    e20_now    = float(e20.iloc[-1])
+    e20_prev   = float(e20.iloc[-2])
+    e200_val   = float(e200.iloc[-1])
+    last_close = float(close.iloc[-1])
+    adx_val    = _adx(df)
 
     crossed_up   = sma9_prev <= e20_prev and sma9_now > e20_now
     crossed_down = sma9_prev >= e20_prev and sma9_now < e20_now
@@ -415,9 +613,9 @@ def _commodity_trending(df, candles, market):
         log.info(f"[COMM] {market} PUT | 9SMA/20EMA Death Cross ADX {adx_val:.1f}")
         return _build(market, "PUT", "high", candles, "fvg_retest")
 
-    htf  = _get_htf_trend(market)
-    fvg  = _find_fvg(df)
-    stoch= _stoch_rsi(close)
+    htf   = _get_htf_trend(market)
+    fvg   = _find_fvg(df)
+    stoch = _stoch_rsi(close)
 
     if htf == 1 and fvg and fvg["type"] == "bullish":
         if float(fvg["low"]) <= last_close <= float(fvg["high"]):
@@ -468,13 +666,11 @@ def _find_sr_levels(df) -> dict:
         lows   = df["low"].values
         closes = df["close"].values
         n      = len(df)
-
         swing_highs, swing_lows = [], []
 
         for i in range(2, min(n-2, 100)):
             idx = n - 1 - i
-            if idx < 2 or idx >= n-2:
-                continue
+            if idx < 2 or idx >= n-2: continue
             if (highs[idx] > highs[idx-1] and highs[idx] > highs[idx-2] and
                 highs[idx] > highs[idx+1] and highs[idx] > highs[idx+2]):
                 swing_highs.append(float(highs[idx]))
@@ -498,16 +694,15 @@ def _find_sr_levels(df) -> dict:
         resistance = cluster(swing_highs)
         support    = cluster(swing_lows)
         last_close = float(closes[-1])
-
-        near_res = min(resistance, key=lambda x: abs(x-last_close)) if resistance else None
-        near_sup = min(support,    key=lambda x: abs(x-last_close)) if support    else None
+        near_res   = min(resistance, key=lambda x: abs(x-last_close)) if resistance else None
+        near_sup   = min(support,    key=lambda x: abs(x-last_close)) if support    else None
 
         return {
-            "resistance":      resistance[-3:] if resistance else [],
-            "support":         support[-3:]    if support    else [],
+            "resistance": resistance[-3:] if resistance else [],
+            "support":    support[-3:]    if support    else [],
             "near_resistance": near_res,
             "near_support":    near_sup,
-            "last_close":      last_close,
+            "last_close": last_close,
         }
     except Exception as e:
         log.debug(f"[S/R] Detection error: {e}")
@@ -521,7 +716,6 @@ def _find_fib_levels(df) -> dict:
         swing_low  = float(recent["low"].min())
         last_close = float(df["close"].iloc[-1])
         rng        = swing_high - swing_low
-
         if rng == 0: return {}
 
         high_idx = recent["high"].idxmax()
@@ -541,10 +735,10 @@ def _find_fib_levels(df) -> dict:
             fib_618 = swing_low + rng * 0.618
             fib_786 = swing_low + rng * 0.786
 
-        levels = {"0.236":fib_236,"0.382":fib_382,"0.500":fib_500,"0.618":fib_618,"0.786":fib_786}
-
-        tolerance    = last_close * 0.0005
-        nearest_fib  = None
+        levels = {"0.236":fib_236,"0.382":fib_382,"0.500":fib_500,
+                  "0.618":fib_618,"0.786":fib_786}
+        tolerance   = last_close * 0.0005
+        nearest_fib = None
         nearest_dist = float('inf')
         nearest_name = None
 
@@ -556,13 +750,11 @@ def _find_fib_levels(df) -> dict:
                 nearest_name = name
 
         return {
-            "levels":       levels,
-            "nearest":      nearest_fib,
+            "levels": levels, "nearest": nearest_fib,
             "nearest_name": nearest_name,
-            "at_fib":       nearest_dist < tolerance,
-            "uptrend":      uptrend,
-            "swing_high":   swing_high,
-            "swing_low":    swing_low,
+            "at_fib": nearest_dist < tolerance,
+            "uptrend": uptrend,
+            "swing_high": swing_high, "swing_low": swing_low,
         }
     except Exception as e:
         log.debug(f"[FIB] Detection error: {e}")
@@ -613,7 +805,7 @@ def _adx(df, p=14):
         dm  = (-l.diff()).clip(lower=0)
         dp  = dp.where(dp > dm, 0)
         dm  = dm.where(dm > dp, 0)
-        atr = tr.ewm(span=p,adjust=False).mean()
+        atr = tr.ewm(span=p, adjust=False).mean()
         dip = 100*dp.ewm(span=p,adjust=False).mean()/atr.replace(0,np.nan)
         dim = 100*dm.ewm(span=p,adjust=False).mean()/atr.replace(0,np.nan)
         dx  = 100*(dip-dim).abs()/(dip+dim).replace(0,np.nan)
@@ -645,10 +837,8 @@ def _find_fvg(df):
             c1l = float(df["low"].iloc[i-1])
             c3h = float(df["high"].iloc[i+1])
             c3l = float(df["low"].iloc[i+1])
-            if c3l > c1h:
-                return {"type":"bullish","low":c1h,"high":c3l}
-            if c1l > c3h:
-                return {"type":"bearish","low":c3h,"high":c1l}
+            if c3l > c1h: return {"type":"bullish","low":c1h,"high":c3l}
+            if c1l > c3h: return {"type":"bearish","low":c3h,"high":c1l}
         return None
     except:
         return None
@@ -658,11 +848,10 @@ def _find_order_block(df, trend_dir):
         for i in range(-5, -20, -1):
             candle  = df.iloc[i]
             c_bull  = float(candle["close"]) > float(candle["open"])
-            c_bear  = not c_bull
             body    = abs(float(candle["close"]) - float(candle["open"]))
             avg_body= float((df["close"]-df["open"]).abs().tail(20).mean())
             if body < avg_body * 1.5: continue
-            if trend_dir == 1 and c_bear:
+            if trend_dir == 1 and not c_bull:
                 return {"type":"bullish","low":float(candle["low"]),"high":float(candle["open"])}
             if trend_dir == -1 and c_bull:
                 return {"type":"bearish","low":float(candle["open"]),"high":float(candle["high"])}
@@ -687,7 +876,6 @@ def _build(market, direction, base_conf, candles, strategy_name):
     score  = result.get("score", 0)
 
     if score >= 3:
-        # Perfect sniper score always = HIGH regardless of base confidence
         result["confirmed"]  = True
         result["confidence"] = "high"
     elif score >= 2:
