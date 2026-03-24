@@ -8,10 +8,10 @@ from functools import wraps
 from flask import Flask, jsonify, request, render_template, redirect, url_for, session
 
 import config
-import bot
+import scalp_bot as bot
 from user_routes import user_bp, register_webhook
 import user_manager as um
-import bot_manager as bm
+import scalp_bot as bm
 
 # ─────────────────────────────────────────
 # Logging
@@ -126,6 +126,7 @@ def status():
         "ai_strategy":     ai_info,
         "risk_pct":        int(config.STAKE_PERCENT),
         "news_events":     _get_upcoming_news(),
+        "positions":       bot.get_status().get("positions", []) if hasattr(bot,'get_status') else [],
         "config": {
             "daily_profit_target": config.DAILY_PROFIT_TARGET,
             "max_daily_loss_pct":  config.MAX_DAILY_LOSS_PCT,
@@ -200,7 +201,6 @@ def debug_news():
             results[key] = {"error": str(e)}
 
     try:
-        from news_filter import news_filter
         results["filter_dynamic_count"] = len(news_filter._dynamic_events)
         results["filter_last_update"]   = str(news_filter._last_update)
         results["source_summary"]       = news_filter.get_source_summary()
@@ -541,7 +541,6 @@ def admin_delete_user():
         return jsonify({"ok": False, "error": "Username required"})
     # Stop their bot first
     try:
-        import bot_manager as bm
         bm.stop_user_bot(username)
     except: pass
     result = um.delete_user(username)
@@ -563,7 +562,6 @@ def health():
 @app.route("/test-connection")
 @login_required
 def test_connection():
-    import websocket, json
     results = {
         "app_id":        config.DERIV_APP_ID,
         "mode":          config.MODE,
