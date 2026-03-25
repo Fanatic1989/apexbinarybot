@@ -167,8 +167,11 @@ def _get_balance() -> float:
 def _get_candles(market: str) -> list:
     try:
         from deriv_api import get_candles
-        return get_candles(market, granularity=60, count=100)
-    except:
+        # Request 150 candles — Gold and forex may return fewer on weekends
+        candles = get_candles(market, granularity=60, count=150)
+        return candles if candles else []
+    except Exception as e:
+        log.debug(f"[SCALP] get_candles {market}: {e}")
         return []
 
 
@@ -440,8 +443,10 @@ def _scan_loop():
                     log.info(f"[SCALP] {market} 📰 {reason}")
                     return
                 candles = _get_candles(market)
-                if not candles or len(candles) < 60:
-                    log.warning(f"[SCALP] {market} insufficient candles ({len(candles) if candles else 0})")
+                min_candles = 40 if market in ("frxXAUUSD", "frxXAGUSD") else 60
+                if not candles or len(candles) < min_candles:
+                    log.warning(f"[SCALP] {market} insufficient candles "
+                                f"({len(candles) if candles else 0}/{min_candles})")
                     return
                 signal = analyze_market(candles, market)
                 if signal and signal.get("confirmed"):
