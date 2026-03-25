@@ -41,6 +41,27 @@ bot_stop_flag = threading.Event()
 TRADE_HISTORY_FILE = "trade_history.json"
 
 # ─────────────────────────────────────────
+# Forex market hours helper
+# ─────────────────────────────────────────
+def is_forex_hours() -> bool:
+    """
+    Returns True if current UTC time is within forex trading hours.
+    Forex is open from Sunday 22:00 UTC to Friday 22:00 UTC.
+    """
+    now = datetime.now(timezone.utc)
+    weekday = now.weekday()  # Monday=0, Sunday=6
+    # Sunday after 22:00 UTC (weekday=6, hour>=22) -> open
+    if weekday == 6 and now.hour >= 22:
+        return True
+    # Monday to Thursday all day
+    if 0 <= weekday <= 3:
+        return True
+    # Friday until 22:00 UTC
+    if weekday == 4 and now.hour < 22:
+        return True
+    return False
+
+# ─────────────────────────────────────────
 # Login required decorator
 # ─────────────────────────────────────────
 def login_required(f):
@@ -696,6 +717,37 @@ def _self_ping_loop():
 
 _ping_thread = threading.Thread(target=_self_ping_loop, daemon=True, name="SelfPing")
 _ping_thread.start()
+
+
+# ─────────────────────────────────────────
+# Auto-start/stop based on forex market hours
+# ─────────────────────────────────────────
+def _auto_manage_bot():
+    """Periodically check if bot should be running based on forex hours."""
+    import time
+    time.sleep(30)  # initial delay
+
+    while True:
+        try:
+            should_run = is_forex_hours()
+            if should_run and not bot_running:
+                log.info("[AUTO-MANAGE] Forex hours detected — starting bot...")
+                # Start bot via the same mechanism as /start
+                with app.test_request_context():
+                    start_bot()
+            elif not should_run and bot_running:
+                log.info("[AUTO-MANAGE] Outside forex hours — stopping bot...")
+                with app.test_request_context():
+                    stop_bot()
+        except Exception as e:
+            log.error(f"[AUTO-MANAGE] Error: {e}")
+
+        # Check every 5 minutes
+        time.sleep(300)
+
+# Start the auto-manage thread
+_auto_manager = threading.Thread(target=_auto_manage_bot, daemon=True, name="AutoManager")
+_auto_manager.start()
 
 
 # ─────────────────────────────────────────
