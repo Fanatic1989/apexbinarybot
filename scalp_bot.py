@@ -427,7 +427,8 @@ def _scan_loop():
 
         log.info(f"[SCALP] Scan #{scan_count} | "
                  f"Open: {open_count}/{MAX_OPEN_POSITIONS} | "
-                 f"Balance: ${_risk_manager.balance:.2f}")
+                 f"Balance: ${_risk_manager.balance:.2f} | "
+                 f"Markets: {len(SCALP_MARKETS)}")
 
         signals = []
         signals_lock = threading.Lock()
@@ -436,14 +437,17 @@ def _scan_loop():
             try:
                 blocked, reason = news_filter.is_news_time(market)
                 if blocked:
-                    log.debug(f"[SCALP] {market} news blocked: {reason}")
+                    log.info(f"[SCALP] {market} 📰 {reason}")
                     return
                 candles = _get_candles(market)
                 if not candles or len(candles) < 60:
+                    log.warning(f"[SCALP] {market} insufficient candles ({len(candles) if candles else 0})")
                     return
                 signal = analyze_market(candles, market)
                 if signal and signal.get("confirmed"):
-                    # Don't trade same market twice
+                    log.info(f"[SCALP] ✅ {market} {signal['direction']} | "
+                             f"{signal['strategy']} | {signal['confidence'].upper()} | "
+                             f"x{signal['multiplier']}")
                     with _lock:
                         already_open = any(
                             p["market"] == market
@@ -452,8 +456,12 @@ def _scan_loop():
                     if not already_open:
                         with signals_lock:
                             signals.append(signal)
+                    else:
+                        log.info(f"[SCALP] {market} already has open position — skipping")
+                else:
+                    log.debug(f"[SCALP] {market} no signal")
             except Exception as e:
-                log.debug(f"[SCALP] {market} scan error: {e}")
+                log.warning(f"[SCALP] {market} scan error: {e}")
 
         with ThreadPoolExecutor(max_workers=6,
                                 thread_name_prefix="ScalpScan") as ex:
@@ -463,6 +471,7 @@ def _scan_loop():
                 except: pass
 
         if not signals:
+            log.info(f"[SCALP] No signals this scan — waiting {SCAN_INTERVAL}s")
             time.sleep(SCAN_INTERVAL)
             continue
 
