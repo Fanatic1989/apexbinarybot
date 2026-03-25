@@ -310,14 +310,28 @@ def _order_block_retest(df, candles, market, htf, atr_now) -> dict:
 # ─────────────────────────────────────────
 def _build_signal(market, direction, strategy, sl_price, tp_price,
                   confidence, reason) -> dict:
-    """Build standardised signal dict for the scalping bot."""
+    """
+    Build standardised signal dict for the scalping bot.
+
+    sl_price / tp_price are ATR-based PRICE DISTANCES (e.g. 0.00012).
+    Deriv Multipliers take dollar SL/TP amounts, so we calculate:
+
+      Dollar SL = stake × (sl_distance / entry_price) × multiplier
+      Dollar TP = stake × (tp_distance / entry_price) × multiplier
+
+    Since we don't know stake at signal time, we store the ATR distances
+    and let the bot calculate dollar amounts at order time.
+    """
     multiplier = _select_multiplier(market)
+    # Store both: raw ATR distance AND ratio for dollar conversion at order time
     return {
         "market":     market,
-        "direction":  direction,       # LONG or SHORT
+        "direction":  direction,
         "strategy":   strategy,
-        "sl":         round(float(sl_price), 6),
-        "tp":         round(float(tp_price), 6),
+        "sl_distance": round(float(sl_price), 6),   # ATR-based price distance
+        "tp_distance": round(float(tp_price), 6),   # ATR-based price distance
+        "sl_ratio":   round(float(sl_price), 6),    # kept for compatibility
+        "tp_ratio":   round(float(tp_price), 6),
         "confidence": confidence,
         "multiplier": multiplier,
         "reason":     reason,
