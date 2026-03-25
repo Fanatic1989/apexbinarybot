@@ -629,9 +629,16 @@ def run_bot():
     Called by server.py _run_bot_safe thread.
     Blocks until bot is stopped.
     """
+    global _bot_running, _bot_thread, _open_positions, _risk_manager
+
+    # Reset state cleanly before starting
+    _bot_running    = False
+    _open_positions = {}
+
     result = start()
     if not result["ok"]:
         raise RuntimeError(result.get("error", "Failed to start scalp bot"))
+
     # Block the thread while bot is running
     import time
     while is_running():
