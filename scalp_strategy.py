@@ -103,12 +103,17 @@ def analyze_market(candles: list, market: str) -> dict:
 
 
 def _in_trading_session(market: str) -> bool:
-    """Gold trades 24h, forex only London+NY"""
+    """
+    Gold: 24/7 — trades globally around the clock
+    JPY pairs: Asian session (00-09 UTC) + London/NY
+    All other forex: London (07-16 UTC) + NY (12-22 UTC)
+    """
     if market in ("frxXAUUSD", "frxXAGUSD"):
         return True
     hour = datetime.datetime.utcnow().hour
-    # London: 07:00-16:00, NY: 12:00-21:00, overlap best
-    return 7 <= hour < 21
+    if market in ("frxUSDJPY",):
+        return 0 <= hour < 9 or 7 <= hour < 22
+    return 7 <= hour < 22
 
 
 # ─────────────────────────────────────────
