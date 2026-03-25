@@ -245,8 +245,8 @@
     <div class="tbl-wrap">
       <table>
         <thead><tr>
-          <th>Time</th><th>Market</th><th>Type</th><th>Direction</th>
-          <th>Expiry</th><th>Timer</th><th>Stake</th><th>Payout</th>
+          <th>Time</th><th>Market</th><th>Direction</th><th>Multiplier</th>
+          <th>Stake</th><th>SL $</th><th>TP $</th><th>RR</th>
           <th>Strategy</th><th>Confidence</th><th>Result</th><th>P&amp;L</th>
         </tr></thead>
         <tbody id="trade-tbody"><tr><td colspan="12" style="text-align:center;color:var(--muted);padding:24px">No trades yet</td></tr></tbody>
@@ -523,7 +523,22 @@ function loadTrades(){
       else if(lm<=0)tmr='<span style="color:var(--amber);font-family:var(--mono);font-size:11px;animation:blink 1s infinite">Settling...</span>';
       else tmr=`<span id="tmr-${cid}" data-settle="${sa.getTime()}" data-dur="${em}" style="font-family:var(--mono);font-size:12px;font-weight:700;color:var(--green)">—</span>`;
       const tttStr=tt?toTTTFull(tt):(t.time||'—');
-      newHtml+=`<tr data-cid="${cid}"><td style="font-family:var(--mono);font-size:10px;white-space:nowrap">${tttStr}</td><td><code style="color:var(--blue);font-size:11px">${t.symbol||t.market||'—'}</code></td><td>${typePill}</td><td>${dirPill}</td><td style="font-family:var(--mono)">${t.expiry||'—'}m</td><td id="tc-${cid}">${tmr}</td><td style="font-family:var(--mono)">$${parseFloat(t.stake||0).toFixed(2)}</td><td style="font-family:var(--mono)">$${parseFloat(t.payout||0).toFixed(2)}</td><td>${stratPill}</td><td>${confPill}</td><td id="rc-${cid}" data-state="${t.result||'open'}">${resPill}</td><td id="pc-${cid}" data-state="${t.result||'open'}">${pnlCell}</td></tr>`;
+      const rrStr = t.rr_ratio ? '1:'+t.rr_ratio : '1:2';
+      const dirStyle = t.direction==='LONG'?'color:#00f5a0':'color:#ff4d6d';
+      newHtml+=`<tr data-cid="${cid}">
+        <td style="font-family:var(--mono);font-size:10px;white-space:nowrap">${tttStr}</td>
+        <td><code style="color:var(--gold);font-size:11px">${t.symbol||t.market||'—'}</code></td>
+        <td>${dirPill}</td>
+        <td style="font-family:var(--mono);color:var(--gold)">x${t.multiplier||'—'}</td>
+        <td style="font-family:var(--mono)">$${parseFloat(t.stake||0).toFixed(2)}</td>
+        <td style="font-family:var(--mono);color:var(--red)">$${parseFloat(t.sl||0).toFixed(2)}</td>
+        <td style="font-family:var(--mono);color:var(--green)">$${parseFloat(t.tp||0).toFixed(2)}</td>
+        <td style="font-family:var(--mono);color:var(--gold)">${rrStr}</td>
+        <td>${stratPill}</td>
+        <td>${confPill}</td>
+        <td id="rc-${cid}" data-state="${t.result||'open'}">${resPill}</td>
+        <td id="pc-${cid}" data-state="${t.result||'open'}">${pnlCell}</td>
+      </tr>`;
     });
     if(newHtml){const nd=tbody.querySelector('td[colspan]');if(nd)tbody.innerHTML=newHtml;else tbody.insertAdjacentHTML('afterbegin',newHtml);}
     const tot=trades.length,wins=trades.filter(t=>t.result==='won').length,los=trades.filter(t=>t.result==='lost').length,opn=trades.filter(t=>t.result==='open'||t.result==='unresolved').length,set=wins+los,wr=set?((wins/set)*100).toFixed(1):'0',wrc=parseFloat(wr)>=65?'var(--green)':parseFloat(wr)>=50?'var(--amber)':'var(--red)';
@@ -745,16 +760,17 @@ function saveCompound(){
 
 function loadCompoundSettings(d){
   if(!d) return;
-  _compoundEnabled = d.compound_enabled || false;
-  _compoundPct     = d.compound_pct    || 50;
-  document.getElementById('compound-pct').value = _compoundPct;
+  _compoundEnabled = !!d.compound_enabled;
+  _compoundPct     = parseInt(d.compound_pct) || 50;
+  const slider = document.getElementById('compound-pct');
+  if(slider) slider.value = _compoundPct;
   updateCompoundLabel(_compoundPct);
-  if(_compoundEnabled){
-    const tog  = document.getElementById('compound-toggle');
-    const knob = document.getElementById('compound-knob');
-    tog.style.background  = 'linear-gradient(135deg,var(--gold3),var(--gold))';
-    knob.style.background = '#000';
-    knob.style.left       = '21px';
+  const tog  = document.getElementById('compound-toggle');
+  const knob = document.getElementById('compound-knob');
+  if(tog && knob){
+    tog.style.background  = _compoundEnabled ? 'linear-gradient(135deg,var(--gold3),var(--gold))' : 'var(--bg3)';
+    knob.style.background = _compoundEnabled ? '#000' : 'var(--muted)';
+    knob.style.left       = _compoundEnabled ? '21px' : '3px';
   }
 }
 
