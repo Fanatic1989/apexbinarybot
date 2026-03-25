@@ -557,6 +557,21 @@ def set_compound():
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
 # ─────────────────────────────────────────
+
+@app.route("/ping")
+def ping():
+    """Lightweight keep-alive endpoint for UptimeRobot and self-ping."""
+    scalp_status = {}
+    try:
+        scalp_status = bot.get_status() if hasattr(bot, "get_status") else {}
+    except: pass
+    return jsonify({
+        "status": "ok",
+        "bot_running": bot_running,
+        "open_positions": scalp_status.get("open_positions", 0),
+        "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+    })
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
@@ -641,18 +656,34 @@ def _run_bot_safe():
 def _self_ping_loop():
     import requests, time
     time.sleep(60)  # Wait 1 min after startup
-    app_url = os.getenv("APP_URL", "").rstrip("/")
+    app_url      = os.getenv("APP_URL", "").rstrip("/")
+    uptimerobot_url = os.getenv("UPTIMEROBOT_HEARTBEAT", "")
+
     if not app_url:
         log.info("[PING] APP_URL not set — self-ping disabled")
         return
-    log.info(f"[PING] Self-ping active → {app_url}/health every 4min")
+
+    log.info(f"[PING] Self-ping active → {app_url}/ping every 2min")
+    if uptimerobot_url:
+        log.info(f"[PING] UptimeRobot heartbeat configured")
+
     while True:
+        # Self-ping to keep Render alive
         try:
-            r = requests.get(f"{app_url}/health", timeout=10)
-            log.debug(f"[PING] ✓ {r.status_code}")
+            r = requests.get(f"{app_url}/ping", timeout=10)
+            log.debug(f"[PING] Self ✓ {r.status_code}")
         except Exception as e:
-            log.debug(f"[PING] Failed: {e}")
-        time.sleep(240)  # 4 minutes
+            log.debug(f"[PING] Self failed: {e}")
+
+        # UptimeRobot heartbeat (if configured)
+        if uptimerobot_url:
+            try:
+                requests.get(uptimerobot_url, timeout=10)
+                log.debug("[PING] UptimeRobot heartbeat sent")
+            except Exception as e:
+                log.debug(f"[PING] UptimeRobot failed: {e}")
+
+        time.sleep(120)  # Every 2 minutes
 
 _ping_thread = threading.Thread(target=_self_ping_loop,
                                  daemon=True, name="SelfPing")
