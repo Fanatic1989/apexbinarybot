@@ -646,49 +646,61 @@ def _run_bot_safe():
 
 
 # ─────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────
-
-# ─────────────────────────────────────────
 # Self-ping — keeps Render free tier alive
-# Pings own health endpoint every 4 minutes
+# Improved: Sends heartbeat to UptimeRobot only when bot is running
 # ─────────────────────────────────────────
 def _self_ping_loop():
     import requests, time
     time.sleep(60)  # Wait 1 min after startup
-    app_url      = os.getenv("APP_URL", "").rstrip("/")
-    uptimerobot_url = os.getenv("UPTIMEROBOT_HEARTBEAT", "")
+
+    app_url = os.getenv("APP_URL", "").rstrip("/")
+    uptime_url = os.getenv("UPTIMEROBOT_HEARTBEAT", "")
 
     if not app_url:
         log.info("[PING] APP_URL not set — self-ping disabled")
         return
 
     log.info(f"[PING] Self-ping active → {app_url}/ping every 2min")
-    if uptimerobot_url:
-        log.info(f"[PING] UptimeRobot heartbeat configured")
+    if uptime_url:
+        log.info("[PING] UptimeRobot heartbeat configured (will only fire when bot is running)")
 
     while True:
-        # Self-ping to keep Render alive
+        # 1. Self-ping to keep Render alive
         try:
             r = requests.get(f"{app_url}/ping", timeout=10)
-            log.debug(f"[PING] Self ✓ {r.status_code}")
+            if r.status_code != 200:
+                log.debug(f"[PING] Self-ping returned {r.status_code}")
+            else:
+                log.debug("[PING] Self-ping OK")
         except Exception as e:
-            log.debug(f"[PING] Self failed: {e}")
+            log.debug(f"[PING] Self-ping failed: {e}")
 
-        # UptimeRobot heartbeat (if configured)
-        if uptimerobot_url:
+        # 2. UptimeRobot heartbeat – only if bot is actually running
+        if uptime_url and bot_running:
             try:
-                requests.get(uptimerobot_url, timeout=10)
-                log.debug("[PING] UptimeRobot heartbeat sent")
+                # Try up to 2 times
+                for attempt in range(2):
+                    r = requests.get(uptime_url, timeout=10)
+                    if r.status_code in (200, 204):
+                        log.debug("[PING] UptimeRobot heartbeat sent")
+                        break
+                    else:
+                        log.debug(f"[PING] UptimeRobot heartbeat attempt {attempt+1} got {r.status_code}")
+                        time.sleep(2)
+                else:
+                    log.warning("[PING] UptimeRobot heartbeat failed after retries")
             except Exception as e:
-                log.debug(f"[PING] UptimeRobot failed: {e}")
+                log.debug(f"[PING] UptimeRobot heartbeat error: {e}")
 
         time.sleep(120)  # Every 2 minutes
 
-_ping_thread = threading.Thread(target=_self_ping_loop,
-                                 daemon=True, name="SelfPing")
+_ping_thread = threading.Thread(target=_self_ping_loop, daemon=True, name="SelfPing")
 _ping_thread.start()
 
+
+# ─────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT") or os.environ.get("port") or 10000)
     log.info(f"[SERVER] Starting Flask on port {port}")
