@@ -100,18 +100,9 @@ def admin_dashboard():
 @app.route("/status")
 @login_required
 def status():
-    risk_summary = None
-    if hasattr(bot, "risk_manager") and bot.risk_manager:
-        risk_summary = bot.risk_manager.get_summary()
-    staking_info = None
-    if hasattr(bot, "staking_engine") and bot.staking_engine:
-        staking_info = bot.staking_engine.get_info()
-
-    ai_info = None
-    try:
-        from strategy_ai import tracker
-        ai_info = tracker.get_summary()
-    except: pass
+    # Get scalp bot status
+    scalp_status = bot.get_status() if hasattr(bot, "get_status") else {}
+    risk_summary = scalp_status.get("risk")
 
     return jsonify({
         "bot_running":     bot_running,
@@ -121,15 +112,13 @@ def status():
         "interval":        config.SCAN_INTERVAL,
         "session":         config.get_current_session(),
         "risk":            risk_summary,
-        "staking":         staking_info,
-        "last_signals":    getattr(bot, "last_signals", []),
-        "ai_strategy":     ai_info,
         "risk_pct":        int(config.STAKE_PERCENT),
         "news_events":     _get_upcoming_news(),
-        "positions":       bot.get_status().get("positions", []) if hasattr(bot,'get_status') else [],
+        "positions":       scalp_status.get("positions", []),
+        "open_positions":  scalp_status.get("open_positions", 0),
         "config": {
-            "daily_profit_target": config.DAILY_PROFIT_TARGET,
-            "max_daily_loss_pct":  config.MAX_DAILY_LOSS_PCT,
+            "daily_profit_target": getattr(config, "DAILY_PROFIT_TARGET", 8.0),
+            "max_daily_loss_pct":  getattr(config, "MAX_DAILY_LOSS_PCT", 5.0),
             "stake_percent":       config.STAKE_PERCENT,
         }
     })
