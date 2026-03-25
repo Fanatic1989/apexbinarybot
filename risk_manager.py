@@ -7,7 +7,430 @@ import config
 log = logging.getLogger(__name__)
 
 
+class RiskManager:import time
+import logging
+from datetime import datetime
+
+import config
+
+log = logging.getLogger(__name__)
+
+
+class TrailingSL:
+    """
+    Tracks and updates a trailing stop-loss for a single open position.
+
+    Usage:
+        trail = TrailingSL(direction="LONG", entry=1.2050, atr=0.0008, multiplier=3.0)
+        # On each price update:
+        sl_hit = trail.update(current_price)
+        if sl_hit:
+            ... close the trade
+    """
+
+    def __init__(self, direction: str, entry: float, atr: float,
+                 trail_multiplier: float = 3.0):
+        """
+        Args:
+            direction:        "LONG" or "SHORT"
+            entry:            Entry price
+            atr:              ATR value at entry (price distance unit)
+            trail_multiplier: SL trails at this many ATRs behind the best price.
+                              Default 3.0 gives a 3:1 trail relative to 1.5×ATR initial SL.
+        """
+        self.direction       = direction
+        self.entry           = entry
+        self.atr             = atr
+        self.trail_mult      = trail_multiplier
+        self.trail_distance  = atr * trail_multiplier
+
+        # Best price seen since entry (starts at entry)
+        self.best_price      = entry
+
+        # Initial SL
+        if direction == "LONG":
+            self.current_sl = entry - self.trail_distance
+        else:
+            self.current_sl = entry + self.trail_distance
+
+        self.initial_sl      = self.current_sl
+        self.updates         = 0
+
+        log.info(
+            f"[TRAIL] {direction} entry={entry:.5f} | "
+            f"ATR={atr:.5f} | trail={trail_multiplier}×ATR={self.trail_distance:.5f} | "
+            f"initial SL={self.current_sl:.5f}"
+        )
+
+    def update(self, price: float) -> bool:
+        """
+        Call on every price tick / candle close.
+
+        Updates the trailing SL if price has moved in our favour.
+        Returns True if the current price has hit or crossed the SL.
+        """
+        self.updates += 1
+
+        if self.direction == "LONG":
+            # Move SL up if price made a new high
+            if price > self.best_price:
+                self.best_price = price
+                new_sl = price - self.trail_distance
+                if new_sl > self.current_sl:
+                    log.debug(
+                        f"[TRAIL] LONG SL raised {self.current_sl:.5f} → {new_sl:.5f} "
+                        f"(best={self.best_price:.5f})"
+                    )
+                    self.current_sl = new_sl
+
+            # Check if price hit SL
+            if price <= self.current_sl:
+                log.info(
+                    f"[TRAIL] LONG SL hit at {price:.5f} (SL={self.current_sl:.5f}) | "
+                    f"Best was {self.best_price:.5f} | "
+                    f"SL moved {(self.current_sl - self.initial_sl):.5f} from initial"
+                )
+                return True
+
+        else:  # SHORT
+            # Move SL down if price made a new low
+            if price < self.best_price:
+                self.best_price = price
+                new_sl = price + self.trail_distance
+                if new_sl < self.current_sl:
+                    log.debug(
+                        f"[TRAIL] SHORT SL lowered {self.current_sl:.5f} → {new_sl:.5f} "
+                        f"(best={self.best_price:.5f})"
+                    )
+                    self.current_sl = new_sl
+
+            # Check if price hit SL
+            if price >= self.current_sl:
+                log.info(
+                    f"[TRAIL] SHORT SL hit at {price:.5f} (SL={self.current_sl:.5f}) | "
+                    f"Best was {self.best_price:.5f} | "
+                    f"SL moved {(self.initial_sl - self.current_sl):.5f} from initial"
+                )
+                return True
+
+        return False
+
+    def pnl_at(self, price: float, stake: float, multiplier: int) -> float:
+        """
+        Estimate unrealised P&L at a given price.
+        Deriv multiplier P&L = stake × (price_change / entry) × multiplier
+        """
+        if self.direction == "LONG":
+            change = (price - self.entry) / self.entry
+        else:
+            change = (self.entry - price) / self.entry
+        return round(stake * change * multiplier, 4)
+
+    def sl_distance_pct(self) -> float:
+        """Current SL distance from entry as a percentage of entry price."""
+        return abs(self.current_sl - self.entry) / self.entry * 100
+
+    @property
+    def in_profit(self) -> bool:
+        """True if the SL has been trailed above breakeven."""
+        if self.direction == "LONG":
+            return self.current_sl > self.entry
+        return self.current_sl < self.entry
+
+    def __repr__(self):
+        return (
+            f"TrailingSL({self.direction} entry={self.entry:.5f} "
+            f"best={self.best_price:.5f} sl={self.current_sl:.5f})"
+        )
+
+
 class RiskManager:
+    """
+    Centralised risk management for the Deriv bot.
+
+    Tracks:
+      - Account balance and daily P&L
+      - Consecutive losses and pause state
+      - Daily loss limit and profit target
+      - Per-session trade statistics
+      - Active trailing SL instances per market
+    """
+
+    def __init__(self, starting_balance: float):
+        # ── Balance ──────────────────────────
+        self.starting_balance  = starting_balance
+        self.current_balance   = starting_balance
+        self.daily_start_bal   = starting_balance
+
+        # ── Session stats ────────────────────
+        self.total_trades      = 0
+        self.total_wins        = 0
+        self.total_losses      = 0
+        self.total_profit      = 0.0
+        self.total_loss_amount = 0.0
+
+        # ── Daily stats ──────────────────────
+        self.daily_profit      = 0.0
+        self.daily_loss        = 0.0
+
+        # ── Consecutive loss tracking ────────
+        self.consecutive_losses = 0
+
+        # ── Pause state ──────────────────────
+        self._paused_until     = None
+
+        # ── Active trailing SLs (market → TrailingSL) ──
+        self._trailing_sls: dict[str, TrailingSL] = {}
+
+        # ── Session start ────────────────────
+        self.session_start     = datetime.utcnow()
+
+        log.info(
+            f"[RISK] Initialised | Balance: ${starting_balance:.2f} | "
+            f"Stake: {config.STAKE_PERCENT}% | "
+            f"Daily loss limit: {config.MAX_DAILY_LOSS_PCT}% | "
+            f"Daily target: {config.DAILY_PROFIT_TARGET}%"
+        )
+
+    # ─────────────────────────────────────────
+    # Stake calculation
+    # ─────────────────────────────────────────
+    def calculate_stake(self, multiplier: int = 50) -> float:
+        """
+        Return stake amount based on current balance and STAKE_PERCENT.
+
+        At high multipliers the effective exposure is stake × multiplier,
+        so we apply a multiplier-aware hard cap:
+          - multiplier ≤ 20  → cap at 2% of balance
+          - multiplier 21-50 → cap at 1% of balance
+          - multiplier > 50  → cap at 0.5% of balance
+
+        Enforces a minimum stake of $0.35 (Deriv minimum).
+        """
+        if multiplier > 50:
+            hard_cap_pct = 0.5
+        elif multiplier > 20:
+            hard_cap_pct = 1.0
+        else:
+            hard_cap_pct = 2.0
+
+        stake = round(self.current_balance * (config.STAKE_PERCENT / 100), 2)
+        stake = max(stake, 0.35)
+        stake = min(stake, self.current_balance * (hard_cap_pct / 100))
+        return round(stake, 2)
+
+    # ─────────────────────────────────────────
+    # Trailing SL management
+    # ─────────────────────────────────────────
+    def attach_trailing_sl(self, market: str, direction: str,
+                           entry: float, atr: float,
+                           trail_multiplier: float = 3.0) -> TrailingSL:
+        """
+        Create and register a trailing SL for an open position.
+
+        Args:
+            market:          e.g. "frxXAUUSD"
+            direction:       "LONG" or "SHORT"
+            entry:           Entry price
+            atr:             ATR at signal time (from scalp_strategy)
+            trail_multiplier: How many ATRs to trail behind the best price.
+                              Default 3.0 → SL trails 3×ATR, giving a ~3:1 RR
+                              vs. the 1.5×ATR initial distance.
+
+        Returns the TrailingSL instance (also stored internally).
+        """
+        trail = TrailingSL(direction, entry, atr, trail_multiplier)
+        self._trailing_sls[market] = trail
+        return trail
+
+    def update_trailing_sl(self, market: str, current_price: float) -> bool:
+        """
+        Update the trailing SL for a market with the latest price.
+
+        Returns True if the SL was hit (caller should close the trade).
+        Returns False if still open.
+        Logs a warning if no trailing SL is registered for this market.
+        """
+        trail = self._trailing_sls.get(market)
+        if trail is None:
+            log.warning(f"[TRAIL] No trailing SL registered for {market}")
+            return False
+        return trail.update(current_price)
+
+    def get_trailing_sl(self, market: str) -> "TrailingSL | None":
+        """Return the active TrailingSL for a market, or None."""
+        return self._trailing_sls.get(market)
+
+    def remove_trailing_sl(self, market: str):
+        """Remove a trailing SL after a trade closes."""
+        self._trailing_sls.pop(market, None)
+
+    # ─────────────────────────────────────────
+    # Record outcomes
+    # ─────────────────────────────────────────
+    def record_win(self, profit: float, market: str = None):
+        """
+        Call this after a winning trade closes.
+
+        Args:
+            profit: Actual dollar profit received from Deriv.
+            market: If provided, removes the trailing SL for this market.
+        """
+        self.total_trades      += 1
+        self.total_wins        += 1
+        self.total_profit      += profit
+        self.daily_profit      += profit
+        self.current_balance   += profit
+        self.consecutive_losses = 0
+
+        if market:
+            self.remove_trailing_sl(market)
+
+        log.info(
+            f"[RISK] ✅ WIN  +${profit:.2f} | "
+            f"Balance: ${self.current_balance:.2f} | "
+            f"Daily P&L: +${self.daily_profit:.2f}"
+        )
+        self._log_stats()
+
+    def record_loss(self, loss_amount: float, market: str = None):
+        """
+        Call this after a losing trade closes.
+
+        IMPORTANT: Pass the actual SL dollar amount that was deducted by Deriv,
+        NOT the stake. With multipliers, your loss = stake × (sl_distance/entry) × multiplier,
+        which is capped by Deriv's SL mechanism.
+
+        Args:
+            loss_amount: Actual dollar loss (SL hit amount), always positive.
+            market:      If provided, removes the trailing SL for this market.
+        """
+        self.total_trades       += 1
+        self.total_losses       += 1
+        self.total_loss_amount  += loss_amount
+        self.daily_loss         += loss_amount
+        self.current_balance    -= loss_amount
+        self.consecutive_losses += 1
+
+        if market:
+            self.remove_trailing_sl(market)
+
+        log.warning(
+            f"[RISK] ❌ LOSS -${loss_amount:.2f} | "
+            f"Balance: ${self.current_balance:.2f} | "
+            f"Consecutive: {self.consecutive_losses} | "
+            f"Daily loss: -${self.daily_loss:.2f}"
+        )
+        self._log_stats()
+
+    # ─────────────────────────────────────────
+    # Pause logic
+    # ─────────────────────────────────────────
+    def trigger_pause(self):
+        self._paused_until = time.time() + config.PAUSE_DURATION
+        resume_at = datetime.utcfromtimestamp(self._paused_until).strftime("%H:%M:%S UTC")
+        log.warning(
+            f"[RISK] ⏸  Bot paused for "
+            f"{config.PAUSE_DURATION // 60} minutes. "
+            f"Resuming at {resume_at}"
+        )
+        self.consecutive_losses = 0
+
+    def is_paused(self) -> bool:
+        if self._paused_until is None:
+            return False
+        if time.time() < self._paused_until:
+            return True
+        self._paused_until = None
+        log.info("[RISK] ▶️  Pause expired. Resuming trading.")
+        return False
+
+    def pause_remaining(self) -> float:
+        if self._paused_until is None:
+            return 0.0
+        return max(self._paused_until - time.time(), 0.0)
+
+    # ─────────────────────────────────────────
+    # Daily limit checks
+    # ─────────────────────────────────────────
+    def daily_loss_limit_hit(self) -> bool:
+        if self.daily_start_bal <= 0 or self.daily_loss <= 0:
+            return False
+        return (self.daily_loss / self.daily_start_bal) * 100 >= config.MAX_DAILY_LOSS_PCT
+
+    def daily_profit_target_hit(self) -> bool:
+        if self.daily_start_bal <= 0:
+            return False
+        return (self.daily_profit / self.daily_start_bal) * 100 >= config.DAILY_PROFIT_TARGET
+
+    # ─────────────────────────────────────────
+    # Status check
+    # ─────────────────────────────────────────
+    def status(self) -> str:
+        """
+        Returns one of: "TRADE", "PAUSE", "STOP"
+        """
+        if self.daily_loss_limit_hit() or self.daily_profit_target_hit():
+            return "STOP"
+        if self.is_paused():
+            return "PAUSE"
+        if self.consecutive_losses >= config.MAX_CONSECUTIVE_LOSS:
+            self.trigger_pause()
+            return "PAUSE"
+        return "TRADE"
+
+    # ─────────────────────────────────────────
+    # Daily reset
+    # ─────────────────────────────────────────
+    def reset_daily(self, new_balance: float = None):
+        self.daily_profit    = 0.0
+        self.daily_loss      = 0.0
+        self.daily_start_bal = new_balance or self.current_balance
+        self.current_balance = self.daily_start_bal
+        self._paused_until   = None
+        self.consecutive_losses = 0
+        self._trailing_sls.clear()
+        log.info(f"[RISK] 🔄 Daily reset | New balance: ${self.daily_start_bal:.2f}")
+
+    # ─────────────────────────────────────────
+    # Session summary
+    # ─────────────────────────────────────────
+    def get_summary(self) -> dict:
+        win_rate = (
+            round((self.total_wins / self.total_trades) * 100, 1)
+            if self.total_trades > 0 else 0.0
+        )
+        net_pnl = self.total_profit - self.total_loss_amount
+        return {
+            "balance":        round(self.current_balance, 2),
+            "starting_bal":   round(self.starting_balance, 2),
+            "total_trades":   self.total_trades,
+            "wins":           self.total_wins,
+            "losses":         self.total_losses,
+            "win_rate":       win_rate,
+            "net_pnl":        round(net_pnl, 2),
+            "daily_profit":   round(self.daily_profit, 2),
+            "daily_loss":     round(self.daily_loss, 2),
+            "consec_losses":  self.consecutive_losses,
+            "open_trails":    len(self._trailing_sls),
+            "status":         "TRADE" if not self.is_paused() else "PAUSE",
+            "session_start":  self.session_start.strftime("%Y-%m-%d %H:%M UTC"),
+        }
+
+    # ─────────────────────────────────────────
+    # Internal helpers
+    # ─────────────────────────────────────────
+    def _log_stats(self):
+        win_rate = (
+            round((self.total_wins / self.total_trades) * 100, 1)
+            if self.total_trades > 0 else 0.0
+        )
+        log.info(
+            f"[RISK] Stats — Trades: {self.total_trades} | "
+            f"W: {self.total_wins} L: {self.total_losses} | "
+            f"Win rate: {win_rate}% | "
+            f"Net P&L: ${self.total_profit - self.total_loss_amount:.2f}"
+        )
     """
     Centralised risk management for the Deriv bot.
 
