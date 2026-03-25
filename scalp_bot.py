@@ -557,3 +557,19 @@ def close_all():
         result = _close_position(cid)
         log.info(f"[SCALP] Force closed #{cid}: {result}")
     return {"ok": True, "closed": len(positions)}
+
+
+# ── Compatibility alias — server.py calls run_bot() ──────────
+def run_bot():
+    """
+    Called by server.py _run_bot_safe thread.
+    Blocks until bot is stopped.
+    """
+    result = start()
+    if not result["ok"]:
+        raise RuntimeError(result.get("error", "Failed to start scalp bot"))
+    # Block the thread while bot is running
+    import time
+    while is_running():
+        time.sleep(5)
+    log.info("[SCALP] run_bot() exiting")
