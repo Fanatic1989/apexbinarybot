@@ -116,6 +116,7 @@ def status():
         "news_events":     _get_upcoming_news(),
         "positions":       scalp_status.get("positions", []),
         "open_positions":  scalp_status.get("open_positions", 0),
+        "compound":        scalp_status.get("compound", {}),
         "config": {
             "daily_profit_target": getattr(config, "DAILY_PROFIT_TARGET", 8.0),
             "max_daily_loss_pct":  getattr(config, "MAX_DAILY_LOSS_PCT", 5.0),
@@ -536,6 +537,22 @@ def admin_delete_user():
     if result["ok"]:
         log.info(f"[ADMIN] Deleted user: {username}")
     return jsonify(result)
+
+
+# ─────────────────────────────────────────
+# Route: Set compounding
+# ─────────────────────────────────────────
+@app.route("/set-compound", methods=["POST"])
+@login_required
+def set_compound():
+    data    = request.get_json() or {}
+    enabled = bool(data.get("enabled", False))
+    pct     = int(data.get("pct", 50))
+    try:
+        bot.set_compound(enabled, pct)
+        return jsonify({"ok": True, "enabled": enabled, "pct": pct})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 # ─────────────────────────────────────────
 # Route: Health check — NO login required
