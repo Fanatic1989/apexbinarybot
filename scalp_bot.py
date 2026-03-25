@@ -48,7 +48,43 @@ _risk           = {
     "open":             0,
 }
 _lock = threading.Lock()
-HISTORY_FILE = "scalp_trades.json"
+HISTORY_FILE      = "scalp_trades.json"
+COMPOUND_FILE     = "compound_settings.json"
+
+# ── Compounding settings ──────────────────────────────────────
+_compound_enabled = False
+_compound_pct     = 50      # % of profit to reinvest
+_compound_lock    = threading.Lock()
+
+
+def set_compound(enabled: bool, pct: int):
+    global _compound_enabled, _compound_pct
+    with _compound_lock:
+        _compound_enabled = enabled
+        _compound_pct     = max(10, min(100, pct))
+    try:
+        with open(COMPOUND_FILE, "w") as f:
+            import json as _j
+            _j.dump({"enabled": enabled, "pct": _compound_pct}, f)
+    except: pass
+    log.info(f"[COMPOUND] {'ON' if enabled else 'OFF'} | {_compound_pct}% reinvest")
+
+
+def load_compound_settings():
+    global _compound_enabled, _compound_pct
+    try:
+        with open(COMPOUND_FILE) as f:
+            import json as _j
+            d = _j.load(f)
+        _compound_enabled = d.get("enabled", False)
+        _compound_pct     = d.get("pct", 50)
+        log.info(f"[COMPOUND] Loaded: {'ON' if _compound_enabled else 'OFF'} {_compound_pct}%")
+    except:
+        pass
+
+
+def get_compound_settings() -> dict:
+    return {"compound_enabled": _compound_enabled, "compound_pct": _compound_pct}
 
 
 # ─────────────────────────────────────────
@@ -172,9 +208,9 @@ def _open_multiplier(market: str, direction: str, stake: float,
                 "multiplier":      multiplier,
                 "limit_order": {
                     "stop_loss":    {"order_type": "stop_loss",
-                                    "order_amount": round(stake, 2)},
+                                    "order_amount": round(sl, 2)},
                     "take_profit":  {"order_type": "take_profit",
-                                    "order_amount": round(stake * 2, 2)},
+                                    "order_amount": round(tp, 2)},
                 }
             }
         }
@@ -320,6 +356,15 @@ def _monitor_positions():
                         if _risk_manager:
                             if profit > 0:
                                 _risk_manager.record_win(profit)
+                                # Apply compounding
+                                if _compound_enabled and profit > 0:
+                                    reinvest = profit * (_compound_pct / 100)
+                                    old_stake = _risk_manager.stake_for_trade()
+                                    # Increase effective balance for next stake calc
+                                    _risk_manager.balance += reinvest
+                                    log.info(f"[COMPOUND] Reinvesting ${reinvest:.2f} "
+                                             f"({_compound_pct}% of ${profit:.2f} win) "
+                                             f"→ new stake ~${_risk_manager.stake_for_trade():.2f}")
                             else:
                                 _risk_manager.record_loss(abs(profit))
                         closed_ids.append(cid)
@@ -452,11 +497,25 @@ def _execute_trade(signal: dict):
 
     stake = _risk_manager.stake_for_trade()
 
+    # Convert ATR price distance to dollar amounts for Deriv Multipliers
+    # Formula: dollar_amount = stake × (price_distance / typical_price) × multiplier
+    # For forex: 1 pip ≈ 0.0001, for Gold: 1 pip ≈ 0.01
+    sl_dist = signal.get("sl_distance", signal.get("sl", 0.0002))
+    tp_dist = signal.get("tp_distance", signal.get("tp", 0.0004))
+
+    # Dollar SL = we risk the full stake on SL hit (Deriv standard)
+    # Dollar TP = stake × RR ratio (tp_dist / sl_dist)
+    sl_dollars = round(stake, 2)                          # lose full stake if SL
+    rr_ratio   = tp_dist / sl_dist if sl_dist > 0 else 2.0
+    tp_dollars = round(stake * rr_ratio, 2)               # win stake × RR at TP
+
     log.info(f"[SCALP] ⚡ {market} {direction} | "
              f"Strategy: {strategy} | x{multiplier} | "
-             f"Stake: ${stake:.2f} | SL: {sl:.5f} | TP: {tp:.5f}")
+             f"Stake: ${stake:.2f} | SL: ${sl_dollars:.2f} | "
+             f"TP: ${tp_dollars:.2f} | RR: 1:{rr_ratio:.1f}")
 
-    result = _open_multiplier(market, direction, stake, multiplier, sl, tp)
+    result = _open_multiplier(market, direction, stake, multiplier,
+                               sl_dollars, tp_dollars)
     if not result:
         log.warning(f"[SCALP] Failed to open {market} {direction}")
         return
@@ -472,8 +531,11 @@ def _execute_trade(signal: dict):
         "strategy":     strategy,
         "multiplier":   multiplier,
         "stake":        stake,
-        "sl":           sl,
-        "tp":           tp,
+        "sl":           sl_dollars,
+        "tp":           tp_dollars,
+        "sl_distance":  sl_dist,
+        "tp_distance":  tp_dist,
+        "rr_ratio":     round(rr_ratio, 1),
         "confidence":   confidence,
         "reason":       reason,
         "entry_price":  result.get("entry_price", 0),
@@ -522,6 +584,7 @@ def start():
                                     daemon=True, name="ScalpBot")
     _bot_thread.start()
 
+    load_compound_settings()
     log.info(f"[SCALP] Started | Balance: ${balance:.2f}")
     return {"ok": True, "balance": balance}
 
@@ -546,6 +609,7 @@ def get_status() -> dict:
         "open_positions": len(open_pos),
         "positions":      open_pos,
         "risk":           _risk_manager.get_summary() if _risk_manager else None,
+        "compound":       get_compound_settings(),
     }
 
 
