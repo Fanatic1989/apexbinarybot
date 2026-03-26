@@ -1,6 +1,6 @@
 """
 Apex Scalping Bot v1.0 — Deriv Multipliers
-Forex & Gold scalping with ATR-based SL/TP
+Forex & Gold scalping with ATR-based SL/TP + Trailing Stop
 """
 import threading
 import logging
@@ -25,18 +25,23 @@ SCALP_MARKETS = [
     "frxAUDUSD",
     "frxUSDCHF",
     "frxXAUUSD",  # Gold
+    # Add more if desired
 ]
 
 # ── Risk settings ─────────────────────────────────────────────
 MAX_OPEN_POSITIONS = 3     # Max concurrent trades
-SCAN_INTERVAL      = 30    # Seconds between scans (faster than binary)
+SCAN_INTERVAL      = 30    # Seconds between scans
 MAX_DAILY_LOSS_PCT = 5.0   # Stop trading if down 5%
 DAILY_PROFIT_PCT   = 8.0   # Stop trading when up 8%
+
+# ── Trailing stop settings ───────────────────────────────────
+TRAIL_ACTIVATE_PCT   = 1.0   # Activate after profit > stake × this value (e.g., 1.0 = profit > stake)
+TRAIL_DISTANCE_PCT   = 1.0   # Close if profit falls from peak by stake × this value
 
 # ── Globals ───────────────────────────────────────────────────
 _bot_running    = False
 _bot_thread     = None
-_open_positions = {}   # contract_id -> position info
+_open_positions = {}   # contract_id -> position info (includes trailing data)
 _trade_history  = []
 _risk           = {
     "balance":          0.0,
@@ -167,7 +172,6 @@ def _get_balance() -> float:
 def _get_candles(market: str) -> list:
     try:
         from deriv_api import get_candles
-        # Request 150 candles — Gold and forex may return fewer on weekends
         candles = get_candles(market, granularity=60, count=150)
         return candles if candles else []
     except Exception as e:
@@ -180,7 +184,7 @@ def _open_multiplier(market: str, direction: str, stake: float,
     """
     Open a Deriv Multiplier position.
     direction: LONG or SHORT
-    sl/tp: price distance (not price level)
+    sl/tp: dollar amounts for stop loss and take profit (Deriv uses absolute amounts)
     Returns: {contract_id, entry_price, ...} or {}
     """
     try:
@@ -191,14 +195,12 @@ def _open_multiplier(market: str, direction: str, stake: float,
             f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
             timeout=15
         )
-        # Authorize
         ws.send(_j.dumps({"authorize": config.ACTIVE_TOKEN}))
         auth = _j.loads(ws.recv())
         if "error" in auth:
             ws.close()
             return {}
 
-        # Buy multiplier
         payload = {
             "buy": 1,
             "price": stake,
@@ -210,10 +212,8 @@ def _open_multiplier(market: str, direction: str, stake: float,
                 "symbol":          market,
                 "multiplier":      multiplier,
                 "limit_order": {
-                    "stop_loss":    {"order_type": "stop_loss",
-                                    "order_amount": round(sl, 2)},
-                    "take_profit":  {"order_type": "take_profit",
-                                    "order_amount": round(tp, 2)},
+                    "stop_loss":    {"order_type": "stop_loss", "order_amount": round(sl, 2)},
+                    "take_profit":  {"order_type": "take_profit", "order_amount": round(tp, 2)},
                 }
             }
         }
@@ -259,10 +259,8 @@ def _get_position_status(contract_id: int) -> dict:
         current_spot = float(poc.get("current_spot", 0))
 
         if status in ("sold", "won", "lost"):
-            return {"status": "closed", "profit": profit,
-                    "current_spot": current_spot}
-        return {"status": "open", "profit": profit,
-                "current_spot": current_spot}
+            return {"status": "closed", "profit": profit, "current_spot": current_spot}
+        return {"status": "open", "profit": profit, "current_spot": current_spot}
     except Exception as e:
         log.debug(f"[DERIV] Status check {contract_id}: {e}")
         return {"status": "unknown", "profit": 0}
@@ -333,10 +331,10 @@ def get_trade_history() -> list:
 
 
 # ─────────────────────────────────────────
-# POSITION MONITOR
+# POSITION MONITOR (with trailing stop)
 # ─────────────────────────────────────────
 def _monitor_positions():
-    """Background thread — polls open positions every 10 seconds."""
+    """Background thread — polls open positions every 10 seconds and manages trailing stop."""
     global _open_positions, _risk_manager
 
     while _bot_running:
@@ -359,15 +357,10 @@ def _monitor_positions():
                         if _risk_manager:
                             if profit > 0:
                                 _risk_manager.record_win(profit)
-                                # Apply compounding
                                 if _compound_enabled and profit > 0:
                                     reinvest = profit * (_compound_pct / 100)
-                                    old_stake = _risk_manager.stake_for_trade()
-                                    # Increase effective balance for next stake calc
                                     _risk_manager.balance += reinvest
-                                    log.info(f"[COMPOUND] Reinvesting ${reinvest:.2f} "
-                                             f"({_compound_pct}% of ${profit:.2f} win) "
-                                             f"→ new stake ~${_risk_manager.stake_for_trade():.2f}")
+                                    log.info(f"[COMPOUND] Reinvesting ${reinvest:.2f} ({_compound_pct}% of ${profit:.2f} win)")
                             else:
                                 _risk_manager.record_loss(abs(profit))
                         closed_ids.append(cid)
@@ -375,23 +368,85 @@ def _monitor_positions():
                     _update_trade(cid, {
                         "result": result,
                         "profit": round(profit, 2),
-                        "close_time": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%d %H:%M:%S UTC"),
+                        "close_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                         "current_spot": status.get("current_spot", 0),
                     })
+                    log.info(f"[SCALP] {'✅ WON' if profit>0 else '❌ LOST'} #{cid} | P&L: ${profit:+.2f} | {pos['market']} {pos['direction']}")
 
-                    log.info(f"[SCALP] {'✅ WON' if profit>0 else '❌ LOST'} "
-                             f"#{cid} | P&L: ${profit:+.2f} | "
-                             f"{pos['market']} {pos['direction']}")
                 else:
-                    # Update floating P&L in history
-                    floating = float(status.get("profit", 0))
-                    _update_trade(cid, {"floating_pnl": round(floating, 2),
-                                        "current_spot": status.get("current_spot", 0)})
+                    # Position still open – trailing stop logic
+                    profit = status["profit"]
+                    stake = pos.get("stake", 0)
+                    if stake <= 0:
+                        continue
+
+                    # Get trailing state from position dict
+                    trailing_activated = pos.get("trailing_activated", False)
+                    peak_profit = pos.get("peak_profit", profit)
+
+                    # Update peak profit if current profit is higher
+                    if profit > peak_profit:
+                        peak_profit = profit
+                        with _lock:
+                            if cid in _open_positions:
+                                _open_positions[cid]["peak_profit"] = peak_profit
+                                _open_positions[cid]["peak_price"] = status.get("current_spot", pos.get("entry_price", 0))
+                        # Optionally log new peak
+                        log.debug(f"[TRAIL] #{cid} new peak profit ${peak_profit:.2f}")
+
+                    # Activate trailing if not already active and profit > stake * TRAIL_ACTIVATE_PCT
+                    if not trailing_activated and profit > stake * TRAIL_ACTIVATE_PCT:
+                        with _lock:
+                            if cid in _open_positions:
+                                _open_positions[cid]["trailing_activated"] = True
+                                _open_positions[cid]["peak_profit"] = peak_profit
+                        trailing_activated = True
+                        log.info(f"[TRAIL] Activated trailing for #{cid} | profit ${profit:.2f} > ${stake * TRAIL_ACTIVATE_PCT:.2f}")
+
+                    # If trailing is active, check if profit has dropped enough to close
+                    if trailing_activated:
+                        drawdown = peak_profit - profit
+                        if drawdown > stake * TRAIL_DISTANCE_PCT:
+                            log.info(f"[TRAIL] Closing #{cid} | drawdown ${drawdown:.2f} from peak ${peak_profit:.2f}")
+                            close_result = _close_position(cid)
+                            if close_result.get("ok", False):
+                                profit = close_result["profit"]
+                                # Record the closed trade manually
+                                with _lock:
+                                    if _risk_manager:
+                                        if profit > 0:
+                                            _risk_manager.record_win(profit)
+                                            if _compound_enabled:
+                                                reinvest = profit * (_compound_pct / 100)
+                                                _risk_manager.balance += reinvest
+                                                log.info(f"[COMPOUND] Reinvesting ${reinvest:.2f} ({_compound_pct}% of ${profit:.2f} win)")
+                                        else:
+                                            _risk_manager.record_loss(abs(profit))
+                                    closed_ids.append(cid)
+                                _update_trade(cid, {
+                                    "result": "won" if profit > 0 else "lost",
+                                    "profit": round(profit, 2),
+                                    "close_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                                    "close_reason": "trailing",
+                                    "current_spot": status.get("current_spot", 0),
+                                })
+                                log.info(f"[SCALP] {'✅ WON' if profit>0 else '❌ LOST'} (trailing) #{cid} | P&L: ${profit:+.2f}")
+                            else:
+                                log.warning(f"[TRAIL] Failed to close #{cid}")
+                            continue  # skip updating floating P&L for this closed position
+
+                    # Update floating P&L in history (only if still open)
+                    if cid not in closed_ids:
+                        _update_trade(cid, {
+                            "floating_pnl": round(profit, 2),
+                            "current_spot": status.get("current_spot", 0),
+                            "peak_profit": peak_profit if trailing_activated else None,
+                        })
 
             except Exception as e:
                 log.debug(f"[MONITOR] {cid}: {e}")
 
+        # Remove closed positions from memory
         if closed_ids:
             with _lock:
                 for cid in closed_ids:
@@ -399,7 +454,7 @@ def _monitor_positions():
 
 
 # ─────────────────────────────────────────
-# MAIN SCAN LOOP
+# MAIN SCAN LOOP (unchanged)
 # ─────────────────────────────────────────
 def _scan_loop():
     global _bot_running, _risk_manager, _open_positions
@@ -428,10 +483,7 @@ def _scan_loop():
             time.sleep(SCAN_INTERVAL)
             continue
 
-        log.info(f"[SCALP] Scan #{scan_count} | "
-                 f"Open: {open_count}/{MAX_OPEN_POSITIONS} | "
-                 f"Balance: ${_risk_manager.balance:.2f} | "
-                 f"Markets: {len(SCALP_MARKETS)}")
+        log.info(f"[SCALP] Scan #{scan_count} | Open: {open_count}/{MAX_OPEN_POSITIONS} | Balance: ${_risk_manager.balance:.2f} | Markets: {len(SCALP_MARKETS)}")
 
         signals = []
         signals_lock = threading.Lock()
@@ -445,19 +497,13 @@ def _scan_loop():
                 candles = _get_candles(market)
                 min_candles = 40 if market in ("frxXAUUSD", "frxXAGUSD") else 60
                 if not candles or len(candles) < min_candles:
-                    log.warning(f"[SCALP] {market} insufficient candles "
-                                f"({len(candles) if candles else 0}/{min_candles})")
+                    log.warning(f"[SCALP] {market} insufficient candles ({len(candles) if candles else 0}/{min_candles})")
                     return
                 signal = analyze_market(candles, market)
                 if signal and signal.get("confirmed"):
-                    log.info(f"[SCALP] ✅ {market} {signal['direction']} | "
-                             f"{signal['strategy']} | {signal['confidence'].upper()} | "
-                             f"x{signal['multiplier']}")
+                    log.info(f"[SCALP] ✅ {market} {signal['direction']} | {signal['strategy']} | {signal['confidence'].upper()} | x{signal['multiplier']}")
                     with _lock:
-                        already_open = any(
-                            p["market"] == market
-                            for p in _open_positions.values()
-                        )
+                        already_open = any(p["market"] == market for p in _open_positions.values())
                     if not already_open:
                         with signals_lock:
                             signals.append(signal)
@@ -468,12 +514,13 @@ def _scan_loop():
             except Exception as e:
                 log.warning(f"[SCALP] {market} scan error: {e}")
 
-        with ThreadPoolExecutor(max_workers=6,
-                                thread_name_prefix="ScalpScan") as ex:
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="ScalpScan") as ex:
             futs = {ex.submit(_scan_market, m): m for m in SCALP_MARKETS}
             for fut in as_completed(futs, timeout=30):
-                try: fut.result()
-                except: pass
+                try:
+                    fut.result()
+                except:
+                    pass
 
         if not signals:
             log.info(f"[SCALP] No signals this scan — waiting {SCAN_INTERVAL}s")
@@ -483,11 +530,10 @@ def _scan_loop():
         # Sort by confidence — HIGH first
         signals.sort(key=lambda s: 0 if s.get("confidence") == "high" else 1)
 
-        # Take best signal (or up to available slots)
         slots = MAX_OPEN_POSITIONS - open_count
         for signal in signals[:slots]:
             _execute_trade(signal)
-            time.sleep(2)  # Small delay between trades
+            time.sleep(2)  # small delay between trades
 
         time.sleep(SCAN_INTERVAL)
 
@@ -506,30 +552,17 @@ def _execute_trade(signal: dict):
     multiplier = signal["multiplier"]
     confidence = signal["confidence"]
     reason     = signal["reason"]
-    sl         = signal["sl"]
-    tp         = signal["tp"]
+    sl_dist    = signal.get("sl_distance", 0.0002)
+    tp_dist    = signal.get("tp_distance", 0.0004)
 
     stake = _risk_manager.stake_for_trade()
-
-    # Convert ATR price distance to dollar amounts for Deriv Multipliers
-    # Formula: dollar_amount = stake × (price_distance / typical_price) × multiplier
-    # For forex: 1 pip ≈ 0.0001, for Gold: 1 pip ≈ 0.01
-    sl_dist = signal.get("sl_distance", signal.get("sl", 0.0002))
-    tp_dist = signal.get("tp_distance", signal.get("tp", 0.0004))
-
-    # Dollar SL = we risk the full stake on SL hit (Deriv standard)
-    # Dollar TP = stake × RR ratio (tp_dist / sl_dist)
-    sl_dollars = round(stake, 2)                          # lose full stake if SL
+    sl_dollars = round(stake, 2)
     rr_ratio   = tp_dist / sl_dist if sl_dist > 0 else 2.0
-    tp_dollars = round(stake * rr_ratio, 2)               # win stake × RR at TP
+    tp_dollars = round(stake * rr_ratio, 2)
 
-    log.info(f"[SCALP] ⚡ {market} {direction} | "
-             f"Strategy: {strategy} | x{multiplier} | "
-             f"Stake: ${stake:.2f} | SL: ${sl_dollars:.2f} | "
-             f"TP: ${tp_dollars:.2f} | RR: 1:{rr_ratio:.1f}")
+    log.info(f"[SCALP] ⚡ {market} {direction} | Strategy: {strategy} | x{multiplier} | Stake: ${stake:.2f} | SL: ${sl_dollars:.2f} | TP: ${tp_dollars:.2f} | RR: 1:{rr_ratio:.1f}")
 
-    result = _open_multiplier(market, direction, stake, multiplier,
-                               sl_dollars, tp_dollars)
+    result = _open_multiplier(market, direction, stake, multiplier, sl_dollars, tp_dollars)
     if not result:
         log.warning(f"[SCALP] Failed to open {market} {direction}")
         return
@@ -565,7 +598,11 @@ def _execute_trade(signal: dict):
             "market":    market,
             "direction": direction,
             "stake":     stake,
+            "entry_price": result.get("entry_price", 0),
             "opened_at": time.time(),
+            "trailing_activated": False,
+            "peak_profit": 0.0,
+            "peak_price": 0.0,
         }
 
     _save_trade(trade)
@@ -573,7 +610,7 @@ def _execute_trade(signal: dict):
 
 
 # ─────────────────────────────────────────
-# PUBLIC INTERFACE
+# PUBLIC INTERFACE (unchanged)
 # ─────────────────────────────────────────
 def start():
     global _bot_running, _bot_thread, _risk_manager
@@ -588,14 +625,10 @@ def start():
     _risk_manager = ScalpRiskManager(balance)
     _bot_running  = True
 
-    # Start monitor thread
-    mon = threading.Thread(target=_monitor_positions,
-                           daemon=True, name="PositionMonitor")
+    mon = threading.Thread(target=_monitor_positions, daemon=True, name="PositionMonitor")
     mon.start()
 
-    # Start scan thread
-    _bot_thread = threading.Thread(target=_scan_loop,
-                                    daemon=True, name="ScalpBot")
+    _bot_thread = threading.Thread(target=_scan_loop, daemon=True, name="ScalpBot")
     _bot_thread.start()
 
     load_compound_settings()
@@ -628,7 +661,6 @@ def get_status() -> dict:
 
 
 def close_all():
-    """Emergency close all open positions."""
     with _lock:
         positions = dict(_open_positions)
     for cid in positions:
@@ -645,7 +677,6 @@ def run_bot():
     """
     global _bot_running, _bot_thread, _open_positions, _risk_manager
 
-    # Reset state cleanly before starting
     _bot_running    = False
     _open_positions = {}
 
@@ -653,8 +684,6 @@ def run_bot():
     if not result["ok"]:
         raise RuntimeError(result.get("error", "Failed to start scalp bot"))
 
-    # Block the thread while bot is running
-    import time
     while is_running():
         time.sleep(5)
     log.info("[SCALP] run_bot() exiting")
