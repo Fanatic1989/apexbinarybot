@@ -1,13 +1,12 @@
 """
-Scalp Strategy v4.0 – Trend-Following Scalper with Trailing Stop
+Scalp Strategy v5.0 – Fast EMA + Trend Follow
 Deriv Multipliers – Forex & Gold
 
-Entry: Pullback to 9 EMA in direction of HTF trend + ADX > 20
-Exit: 1:2 initial target, but trailing stop locks in profit as trend continues
+Strategies:
+  1. Fast EMA (5/13) – crossovers, any market condition
+  2. EMA Trend Follow (9/21) – requires HTF bias + ADX > 15
 
-Trailing logic:
-- After price moves 1× ATR in profit, stop trails at 1.5× ATR from peak
-- This allows trades to ride trends while protecting profits
+All signals have 1:2 risk/reward.
 """
 import logging
 import time
@@ -54,10 +53,8 @@ def _htf_from_candles(candles) -> int:
         return 0
 
 
-# ─────────────────────────────────────────
-# MAIN ENTRY FUNCTION
-# ─────────────────────────────────────────
 def analyze_market(candles: list, market: str) -> dict:
+    """Try all strategies, return first signal."""
     if not candles or len(candles) < 50:
         return None
     try:
@@ -65,7 +62,7 @@ def analyze_market(candles: list, market: str) -> dict:
     except Exception as e:
         log.error(f"[SCALP] {market}: {e}")
         return None
-    if len(df) < 60:
+    if len(df) < 50:
         return None
 
     # ATR for stop sizing
@@ -77,64 +74,90 @@ def analyze_market(candles: list, market: str) -> dict:
         log.debug(f"[SCALP] {market} dead market ATR ratio={atr_ratio:.2f}")
         return None
 
-    # HTF bias
+    # Try fast EMA (5/13) first – no HTF needed
+    signal = _fast_ema_crossover(df, market, atr_now)
+    if signal:
+        return signal
+
+    # Then trend follow with HTF bias and ADX
     htf = _get_htf_bias(market)
-    if htf == 0:
-        return None
-
-    # ADX trend strength
-    adx_val = _adx(df)
-    if adx_val < 20:
-        log.debug(f"[SCALP] {market} ADX={adx_val:.1f} – weak trend")
-        return None
-
-    # Calculate EMAs on 1-min chart
-    close = df["close"]
-    e9 = _ema(close, 9)
-    e21 = _ema(close, 21)
-
-    # Check for pullback to 9 EMA
-    last_close = float(close.iloc[-1])
-    e9_now = float(e9.iloc[-1])
-    e21_now = float(e21.iloc[-1])
-    prev_close = float(close.iloc[-2])
-    prev_e9 = float(e9.iloc[-2])
-
-    # Bullish conditions
-    if htf == 1:
-        # Price above 9 EMA, but pulled back to touch it (within 0.5 ATR)
-        pullback = abs(last_close - e9_now) < 0.5 * atr_now
-        # Confirmation: bullish engulfing or close > previous high
-        last_candle = df.iloc[-1]
-        prev_candle = df.iloc[-2]
-        bullish_conf = (last_candle["close"] > last_candle["open"] and
-                        last_candle["close"] > prev_candle["high"])
-        if pullback and bullish_conf and last_close > e21_now:
-            sl = atr_now * 1.0
-            tp = sl * 2.0
-            log.info(f"[SCALP] {market} LONG | pullback to 9 EMA, ADX={adx_val:.1f}")
-            return _build_signal(market, "LONG", "pullback",
-                                 sl, tp, "high",
-                                 f"Pullback to 9 EMA, ADX={adx_val:.1f}")
-
-    # Bearish conditions
-    if htf == -1:
-        pullback = abs(last_close - e9_now) < 0.5 * atr_now
-        last_candle = df.iloc[-1]
-        prev_candle = df.iloc[-2]
-        bearish_conf = (last_candle["close"] < last_candle["open"] and
-                        last_candle["close"] < prev_candle["low"])
-        if pullback and bearish_conf and last_close < e21_now:
-            sl = atr_now * 1.0
-            tp = sl * 2.0
-            log.info(f"[SCALP] {market} SHORT | pullback to 9 EMA, ADX={adx_val:.1f}")
-            return _build_signal(market, "SHORT", "pullback",
-                                 sl, tp, "high",
-                                 f"Pullback to 9 EMA, ADX={adx_val:.1f}")
+    if htf != 0:
+        signal = _ema_trend_follow(df, market, htf, atr_now)
+        if signal:
+            return signal
 
     return None
 
 
+# ─────────────────────────────────────────
+# FAST EMA CROSSOVER (5/13)
+# ─────────────────────────────────────────
+def _fast_ema_crossover(df, market, atr_now) -> dict:
+    close = df["close"]
+    e5 = _ema(close, 5)
+    e13 = _ema(close, 13)
+
+    e5_now = float(e5.iloc[-1])
+    e5_prev = float(e5.iloc[-2])
+    e13_now = float(e13.iloc[-1])
+    e13_prev = float(e13.iloc[-2])
+
+    crossed_up = e5_prev <= e13_prev and e5_now > e13_now
+    crossed_down = e5_prev >= e13_prev and e5_now < e13_now
+
+    if crossed_up:
+        sl = atr_now * 1.0  # tight stop for scalps
+        tp = sl * 2.0
+        log.info(f"[SCALP] {market} LONG | fast EMA (5/13) cross")
+        return _build_signal(market, "LONG", "fast_ema", sl, tp, "high", "5/13 EMA cross up")
+    if crossed_down:
+        sl = atr_now * 1.0
+        tp = sl * 2.0
+        log.info(f"[SCALP] {market} SHORT | fast EMA (5/13) cross")
+        return _build_signal(market, "SHORT", "fast_ema", sl, tp, "high", "5/13 EMA cross down")
+    return None
+
+
+# ─────────────────────────────────────────
+# EMA TREND FOLLOW (9/21) – requires HTF bias + ADX
+# ─────────────────────────────────────────
+def _ema_trend_follow(df, market, htf, atr_now) -> dict:
+    close = df["close"]
+    e9 = _ema(close, 9)
+    e21 = _ema(close, 21)
+    e50 = float(_ema(close, 50).iloc[-1])
+
+    e9_now = float(e9.iloc[-1])
+    e9_prev = float(e9.iloc[-2])
+    e21_now = float(e21.iloc[-1])
+    e21_prev = float(e21.iloc[-2])
+
+    crossed_up = e9_prev <= e21_prev and e9_now > e21_now
+    crossed_down = e9_prev >= e21_prev and e9_now < e21_now
+
+    adx_val = _adx(df)
+    if adx_val < 15:  # lower threshold
+        return None
+
+    # Bullish cross: both above 50 EMA, HTF bullish
+    if crossed_up and e9_now > e50 and e21_now > e50 and htf == 1:
+        sl = atr_now * 1.5
+        tp = sl * 2.0
+        log.info(f"[SCALP] {market} LONG | EMA trend, ADX={adx_val:.1f}")
+        return _build_signal(market, "LONG", "ema_trend", sl, tp, "high", f"9/21 EMA cross up, ADX={adx_val:.1f}")
+
+    # Bearish cross: both below 50 EMA, HTF bearish
+    if crossed_down and e9_now < e50 and e21_now < e50 and htf == -1:
+        sl = atr_now * 1.5
+        tp = sl * 2.0
+        log.info(f"[SCALP] {market} SHORT | EMA trend, ADX={adx_val:.1f}")
+        return _build_signal(market, "SHORT", "ema_trend", sl, tp, "high", f"9/21 EMA cross down, ADX={adx_val:.1f}")
+    return None
+
+
+# ─────────────────────────────────────────
+# HELPER FUNCTIONS
+# ─────────────────────────────────────────
 def _build_signal(market, direction, strategy, sl_distance, tp_distance,
                   confidence, reason) -> dict:
     multiplier = _select_multiplier(market)
@@ -151,26 +174,18 @@ def _build_signal(market, direction, strategy, sl_distance, tp_distance,
         "type": "multiplier",
     }
 
-
 def _select_multiplier(market: str) -> int:
     if market in ("frxXAUUSD", "frxXAGUSD"):
         return 10
-    # High volatility pairs get lower multiplier
     high_vol = ("frxGBPJPY", "frxEURJPY", "frxGBPUSD")
     return 50 if market in high_vol else 100
 
 
 # ─────────────────────────────────────────
-# INDICATORS (same as before)
+# INDICATORS
 # ─────────────────────────────────────────
 def _ema(s, p):
     return s.ewm(span=p, adjust=False).mean()
-
-def _rsi(s, p=14):
-    d = s.diff()
-    g = d.clip(lower=0).ewm(span=p, adjust=False).mean()
-    l = (-d.clip(upper=0)).ewm(span=p, adjust=False).mean()
-    return 100 - (100 / (1 + g / l.replace(0, np.nan)))
 
 def _adx(df, p=14) -> float:
     try:
