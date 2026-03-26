@@ -441,13 +441,30 @@ function loadTrades(){
   });
 }
 
+// ================= FIXED LOADLOG =================
 function loadLog(){
-  api('/log',d=>{
-    const box=document.getElementById('log-box');let h='';
-    (d.lines||[]).forEach(l=>{l=l.replace(/^(\d{2}:\d{2}:\d{2})/,function(m,t){const p=t.split(':'),d=new Date();d.setUTCHours(parseInt(p[0]),parseInt(p[1]),parseInt(p[2]),0);return toTTT(d);});const cls=l.includes('ERROR')?'er':l.includes('WARN')?'wa':l.includes('WIN')||l.includes('✅')?'ok':'in';h+=`<div class="${cls}">${l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;});
-    box.innerHTML=h||'<span style="color:var(--muted)">No activity yet</span>';box.scrollTop=box.scrollHeight;
+  api('/log', d => {
+    const box = document.getElementById('log-box');
+    // Reverse the lines so that oldest are first, newest last (chronological order)
+    const lines = (d.lines || []).slice().reverse();
+    let html = '';
+    lines.forEach(l => {
+      // Convert the server timestamp (HH:MM:SS) to a more readable local time
+      l = l.replace(/^(\d{2}:\d{2}:\d{2})/, function(m, t) {
+        const parts = t.split(':');
+        const d = new Date();
+        d.setUTCHours(parseInt(parts[0]), parseInt(parts[1]), parseInt(parts[2]), 0);
+        return toTTT(d);
+      });
+      const cls = l.includes('ERROR') ? 'er' : (l.includes('WARN') ? 'wa' : (l.includes('WIN') || l.includes('✅') ? 'ok' : 'in'));
+      html += `<div class="${cls}">${l.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
+    });
+    box.innerHTML = html || '<span style="color:var(--muted)">No activity yet</span>';
+    // Auto‑scroll to the bottom to see the latest message
+    box.scrollTop = box.scrollHeight;
   });
 }
+// ===============================================
 
 function loadUsers(){
   api('/admin/users',d=>{
