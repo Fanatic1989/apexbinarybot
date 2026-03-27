@@ -178,28 +178,31 @@ def _get_candles(market: str) -> list:
 def _open_multiplier(market: str, direction: str, stake: float,
                      multiplier: int, sl: float, tp: float) -> dict:
     """
-    Open a Deriv Multiplier position.
-    direction: LONG or SHORT
-    sl/tp: price distance (not price level)
-    Returns: {contract_id, entry_price, ...} or {}
+    Open a Deriv Multiplier position using two-step:
+    1. Buy contract
+    2. Set SL/TP via contract_update
     """
-    try:
-        import websocket, json as _j
-        contract_type = "MULTUP" if direction == "LONG" else "MULTDOWN"
+    import websocket as _ws_lib
+    import json as _j
 
-        ws = websocket.create_connection(
+    contract_type = "MULTUP" if direction == "LONG" else "MULTDOWN"
+    ws = None
+
+    try:
+        ws = _ws_lib.create_connection(
             f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            timeout=15
+            timeout=20
         )
+
         # Authorize
         ws.send(_j.dumps({"authorize": config.ACTIVE_TOKEN}))
         auth = _j.loads(ws.recv())
         if "error" in auth:
-            ws.close()
+            log.error(f"[DERIV] Auth failed: {auth['error'].get('message','')}")
             return {}
 
-        # Step 1: Buy multiplier (no limit_order in initial buy)
-        payload = {
+        # Buy
+        ws.send(_j.dumps({
             "buy": 1,
             "price": stake,
             "parameters": {
@@ -210,38 +213,35 @@ def _open_multiplier(market: str, direction: str, stake: float,
                 "symbol":        market,
                 "multiplier":    multiplier,
             }
-        }
-        ws.send(_j.dumps(payload))
+        }))
         resp = _j.loads(ws.recv())
 
         if "buy" not in resp:
-            log.error(f"[DERIV] Open failed: {resp.get('error',{}).get('message','')}")
-            ws.close()
+            err = resp.get("error", {}).get("message", "unknown")
+            log.error(f"[DERIV] Buy failed: {err}")
             return {}
 
-        b            = resp["buy"]
-        contract_id  = b["contract_id"]
-        entry_price  = float(b.get("spot", 0))
-        buy_price    = float(b.get("buy_price", stake))
+        b           = resp["buy"]
+        contract_id = b["contract_id"]
+        entry_price = float(b.get("spot", 0))
+        buy_price   = float(b.get("buy_price", stake))
+        log.info(f"[DERIV] Opened #{contract_id} | entry={entry_price}")
 
-        # Step 2: Set SL/TP via contract_update
-        update_payload = {
+        # Set SL/TP
+        ws.send(_j.dumps({
             "contract_update": 1,
             "contract_id":     contract_id,
             "limit_order": {
                 "stop_loss":   round(sl, 2),
                 "take_profit": round(tp, 2),
             }
-        }
-        ws.send(_j.dumps(update_payload))
+        }))
         upd = _j.loads(ws.recv())
-        ws.close()
 
         if "error" in upd:
-            log.warning(f"[DERIV] SL/TP update failed: {upd['error'].get('message','')} "
-                        f"— trade still open without limits")
+            log.warning(f"[DERIV] SL/TP failed: {upd['error'].get('message','')} — open without limits")
         else:
-            log.info(f"[DERIV] SL/TP set: SL=${sl:.2f} TP=${tp:.2f}")
+            log.info(f"[DERIV] SL=${sl:.2f} TP=${tp:.2f} set")
 
         return {
             "contract_id": contract_id,
@@ -249,9 +249,14 @@ def _open_multiplier(market: str, direction: str, stake: float,
             "buy_price":   buy_price,
             "payout":      float(b.get("payout", 0)),
         }
+
     except Exception as e:
         log.error(f"[DERIV] Open multiplier error: {e}")
         return {}
+    finally:
+        if ws:
+            try: ws.close()
+            except: pass
 
 
 def _get_position_status(contract_id: int) -> dict:
@@ -509,8 +514,11 @@ def _scan_loop():
         # Take best signal (or up to available slots)
         slots = MAX_OPEN_POSITIONS - open_count
         for signal in signals[:slots]:
-            _execute_trade(signal)
-            time.sleep(2)  # Small delay between trades
+            try:
+                _execute_trade(signal)
+            except Exception as ex:
+                log.error(f"[SCALP] Execute error: {ex}", exc_info=True)
+            time.sleep(2)
 
         time.sleep(SCAN_INTERVAL)
 
@@ -678,14 +686,22 @@ def run_bot():
 
     # Block the thread — restart bot if it dies unexpectedly
     import time
+    restart_count = 0
     while True:
-        time.sleep(5)
-        if not is_running() and _bot_running:
-            log.warning("[SCALP] Bot thread died unexpectedly — restarting scan loop")
+        time.sleep(10)
+        if not _bot_running:
+            break
+        if not is_running():
+            restart_count += 1
+            if restart_count > 10:
+                log.error("[SCALP] Too many restarts — stopping")
+                break
+            wait = min(restart_count * 5, 30)
+            log.warning(f"[SCALP] Scan loop died — restarting in {wait}s (attempt {restart_count})")
+            time.sleep(wait)
             global _bot_thread
             _bot_thread = threading.Thread(target=_scan_loop,
                                             daemon=True, name="ScalpBot")
             _bot_thread.start()
-        elif not _bot_running:
-            break
+            time.sleep(5)  # Give it time to start
     log.info("[SCALP] run_bot() exiting")
