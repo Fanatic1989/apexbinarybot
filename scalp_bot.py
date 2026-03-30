@@ -535,16 +535,12 @@ def _execute_trade(signal: dict):
     direction  = signal["direction"]
     strategy   = signal["strategy"]
     multiplier = signal["multiplier"]
-    confidence = signal["confidence"]
-    reason     = signal["reason"]
-    sl         = signal["sl"]
-    tp         = signal["tp"]
+    confidence = signal.get("confidence", "normal")
+    reason     = signal.get("reason", "")
 
     stake = _risk_manager.stake_for_trade()
 
-    # Convert ATR price distance to dollar amounts for Deriv Multipliers
-    # Formula: dollar_amount = stake × (price_distance / typical_price) × multiplier
-    # For forex: 1 pip ≈ 0.0001, for Gold: 1 pip ≈ 0.01
+    # Get ATR distances — strategy stores as sl_distance/tp_distance
     sl_dist = signal.get("sl_distance", signal.get("sl", 0.0002))
     tp_dist = signal.get("tp_distance", signal.get("tp", 0.0004))
 
